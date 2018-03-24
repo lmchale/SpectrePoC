@@ -1,6 +1,6 @@
-CFLAGS += -std=c99 -O0
+CFLAGS += -std=c99 -Og -g -march=native
 
-PROGRAM = spectre.out
+PROGRAM = spectre
 SOURCE  = spectre.c
      
 all: $(PROGRAM)

