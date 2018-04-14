@@ -1,9 +1,8 @@
 CFLAGS += -std=c99 -Og -g -march=native
+CXXFLAGS += -std=c++11 -Og -g -march=native
 
-PROGRAM = spectre
-SOURCE  = spectre.c
-     
-all: $(PROGRAM)
+PROGRAM = spectre spectre-victim spectre-attacker
+OBJ = udp-socket.o
 
 GIT_SHELL_EXIT := $(shell git status --porcelain 2> /dev/null >&2 ; echo $$?)
 
@@ -18,6 +17,22 @@ CFLAGS += -DGIT_COMMIT_HASH='"$(GIT_COMMIT_HASH)"'
 endif
 endif
      
-$(PROGRAM): $(SOURCE) ; $(CC) $(CFLAGS) -o $(PROGRAM) $(SOURCE)
-     
-clean: ; rm -f $(PROGRAM)
+.PHONY: all   
+all: $(PROGRAM)
+
+spectre-victim: spectre-victim.cpp $(OBJ)
+	$(CXX) $(CXXFLAGS) -pthread $^ -o $@
+
+%: %.c
+	$(CC) $(CFLAGS) $^ -o $@
+
+%: %.cpp
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $^ -o $@
+
+.PHONY: clean     
+clean:
+	rm -f $(PROGRAM) $(OBJ)
+
