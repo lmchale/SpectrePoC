@@ -23,6 +23,9 @@ all: $(PROGRAM)
 spectre-victim: spectre-victim.cpp $(OBJ)
 	$(CXX) $(CXXFLAGS) -pthread $^ -o $@
 
+spectre-attacker: spectre-attacker.cpp $(OBJ)
+	$(CXX) $(CXXFLAGS) -pthread $^ -o $@
+
 %: %.c
 	$(CC) $(CFLAGS) $^ -o $@
 

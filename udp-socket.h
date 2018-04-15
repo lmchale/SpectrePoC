@@ -13,19 +13,32 @@
 *
 **********************************************************************/
 
+// C++ Includes:
+#include <string>
+
 // C Includes:
 #include <cstdlib>
 #include <cstdint>
 #include <netinet/in.h>
 
+
 class SocketUDP {
 public:
-  SocketUDP(uint16_t port);
-  size_t recv(uint8_t buf[], size_t buf_size) const;
+  SocketUDP();
+  ~SocketUDP();
+
+  int open(uint16_t port);
+
+  size_t recv(uint8_t buf[], size_t buf_size);
+  size_t send(void* buf, size_t buf_size);
+
+  int setRemote(const std::string &ipv4_str, uint16_t port);
+  void setRemote(uint32_t ipv4, uint16_t port);
 
 private:
-  sockaddr_in srv_addr;
-  int sockfd;
+  int sockfd_;
+  sockaddr_in my_addr_;
+  sockaddr_in remote_addr_;
 };
 
 
