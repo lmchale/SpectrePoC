@@ -1,5 +1,5 @@
 CFLAGS += -std=c99 -Og -g -march=native
-CXXFLAGS += -std=c++11 -Og -g -march=native
+CXXFLAGS += -std=c++14 -Og -g -march=native
 
 PROGRAM = spectre spectre-victim spectre-attacker
 OBJ = udp-socket.o

