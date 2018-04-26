@@ -64,18 +64,17 @@ int SocketUDP::setRemote(const std::string &ipv4_str, uint16_t port) {
   int status;
   in_addr ipv4;
   if ( (status = inet_aton(ipv4_str.c_str(), &ipv4)) != 0) {
-    setRemote(ntohl(ipv4.s_addr), port);
+    return setRemote(ntohl(ipv4.s_addr), port);
   }
-  else {
-    std::cerr << "Failed to setRemote to " << ipv4_str << ":" << port << std::endl;
-    return status;
-  }
-  return 0;
+  // else
+  std::cerr << "Failed to setRemote to " << ipv4_str << ":" << port << std::endl;
+  return status;
 }
 
-void SocketUDP::setRemote(uint32_t ipv4, uint16_t port) {
+int SocketUDP::setRemote(uint32_t ipv4, uint16_t port) {
   memset(&remote_addr_, 0, sizeof(remote_addr_));
   remote_addr_.sin_family = AF_INET;
   remote_addr_.sin_addr.s_addr = htonl(ipv4);
   remote_addr_.sin_port = htons(port);
+  return 0;
 }

