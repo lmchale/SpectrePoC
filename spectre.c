@@ -69,7 +69,8 @@ void flush_memory_sse(uint8_t * addr)
 void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
                     uint8_t value[2], int score[2]) {
   static int results[256];
-  int tries, i, j, k, mix_i, junk = 0;
+  int tries, i, j, k, mix_i;
+  unsigned int junk = 0;
   size_t training_x, x;
   register uint64_t time1, time2;
   volatile uint8_t *addr;

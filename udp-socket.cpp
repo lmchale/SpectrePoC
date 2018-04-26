@@ -63,13 +63,14 @@ size_t SocketUDP::send(void* buf, size_t buf_size) {
 int SocketUDP::setRemote(const std::string &ipv4_str, uint16_t port) {
   int status;
   in_addr ipv4;
-  if (status = inet_aton(ipv4_str.c_str(), &ipv4) != 0) {
+  if ( (status = inet_aton(ipv4_str.c_str(), &ipv4)) != 0) {
     setRemote(ntohl(ipv4.s_addr), port);
   }
   else {
     std::cerr << "Failed to setRemote to " << ipv4_str << ":" << port << std::endl;
     return status;
   }
+  return 0;
 }
 
 void SocketUDP::setRemote(uint32_t ipv4, uint16_t port) {

@@ -127,7 +127,7 @@ void init_pages() {
 
   // Write to array2 to initialize pages:
   array2 = sm_ptr->array2;
-  for (auto i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
+  for (size_t i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
     array2[i] = 1;
   }
 }
