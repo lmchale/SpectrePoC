@@ -45,8 +45,8 @@
 Attacker globals.
 ********************************************************************/
 // [Optional] Relevant virtual addresses for attacker's convenience:
-void* target_array1_va;   // VM Address of victim's array (e.g. array1[])
-void* target_va;          // VM Address of target in victim
+uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
+uint64_t target_va;          // VM Address of target in victim
 
 // Target offsets (attack only needs this):
 int64_t target_x_offset;  // Offset relative to victim's array1
@@ -409,10 +409,19 @@ void parse_args(int argc, char* const argv[]) {
 
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "p:s:l:o:c:")) > 0) {
+  while ( (c = getopt(argc, argv, "hp:a:s:l:o:c:")) > 0) {
     switch (c) {
+    case 'h':
+      std::cout << argv[0]
+          << " {(-o target_x_offset) | (-p target_va]) (-a array1_va)}" \
+             " (-l target_bytes) [-c cache_hit_threshold]" << std::endl;
+      exit(EXIT_SUCCESS);
+      break;
     case 'p':
-      target_va = reinterpret_cast<void*>(atoll(optarg));
+      target_va = static_cast<uint64_t>(atoll(optarg));
+      break;
+    case 'a':
+      target_array1_va = static_cast<uint64_t>(atoll(optarg));
       break;
     case 's':
     case 'l':
@@ -499,7 +508,7 @@ int main(int argc, char* const argv[]) {
   else {
     std::cout << "Supplied target_offset:" << target_x_offset << '\n';
   }
-  std::cout << "Reading %ll bytes" << target_size << std::endl;
+  std::cout << "Reading " << target_size << " bytes."<< std::endl;
 
   // What is this doing?
   #ifdef NOCLFLUSH
