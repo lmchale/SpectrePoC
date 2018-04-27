@@ -1,10 +1,10 @@
-FLAGS_DEBUG = -Og -g -march=native -Wall -pedantic
+FLAGS_DEBUG = -Og -g -march=native -Wall -pedantic -fvar-tracking-assignments
 CFLAGS += -std=c99 $(FLAGS_DEBUG)
 CXXFLAGS += -std=c++14 $(FLAGS_DEBUG)
 #CXXFLAGS += -std=c++14 $(FLAGS_DEBUG) -Wold-style-cast
 
 PROGRAM = spectre spectre-victim spectre-attacker
-OBJ = udp-socket.o
+OBJ = udp_socket.o hex_util.o
 
 GIT_SHELL_EXIT := $(shell git status --porcelain 2> /dev/null >&2 ; echo $$?)
 

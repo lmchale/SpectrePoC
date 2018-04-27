@@ -10,7 +10,7 @@
 * across seperate victim and attacker processes.
 *
 **********************************************************************/
-#include "udp-socket.h"
+#include "udp_socket.h"
 
 // C++ Includes:
 #include <iostream>

