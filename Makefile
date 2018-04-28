@@ -7,7 +7,6 @@ PROGRAM = spectre spectre-victim spectre-attacker
 OBJ = udp_socket.o hex_util.o
 
 GIT_SHELL_EXIT := $(shell git status --porcelain 2> /dev/null >&2 ; echo $$?)
-
 # It can be non-zero when not in git repository or git is not installed.
 # It can happen when downloaded using github's "Download ZIP" option.
 ifeq ($(GIT_SHELL_EXIT),0)

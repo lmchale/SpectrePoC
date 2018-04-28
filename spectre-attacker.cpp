@@ -485,7 +485,7 @@ void send_worker(uint16_t port = 7777) {
   assert(s.setRemote("127.0.0.1", port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
 
-  constexpr size_t MIN_MEASUREMENTS = 128;
+  constexpr size_t MIN_MEASUREMENTS = 64;
   size_t measurements = MIN_MEASUREMENTS;
   std::string secret(target_len, 0);
 
@@ -607,10 +607,11 @@ void send_worker(uint16_t port = 7777) {
       // Output statistics:
       float confidence = (float(max) / float(sum)) * 100;
       float observability = (float(max) / measurements) * 100;
-      std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
+      std::cout << "Offset["<<m.x<<"] (" << idx << " : "
+                << static_cast<char>(idx) << "): "
                 << max << '/' << sum << " hits with confidence "
                 << confidence << "%.\n";
-      std::cout << "Observability: " << observability << "% over "
+      std::cout << "- Observability: " << observability << "% over "
                 << measurements << " measurements." << std::endl;
 
       // Reset measurements:

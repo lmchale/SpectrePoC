@@ -14,6 +14,8 @@
 // C++ Includes:
 #include <iostream>
 #include <string>
+#include <vector>
+#include <array>
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -51,8 +53,12 @@ uint8_t array1[160] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 uint8_t unused2[64];
 //uint8_t array2[256 * 512];
 
-char secret[4096];       // contiguous, nearby secret in static-globals section
-std::string secret_heap; // contiguous, secret's data exists on heap
+constexpr size_t MAX_BUF_LENGTH = 4096;
+// Contiguous, nearby secret in static-globals section:
+char secret_global[MAX_BUF_LENGTH];
+// Contiguous, secret's data exists on heap:
+std::vector<char> secret_heap;
+char* secret_stack;
 
 
 /********************************************************************
@@ -65,7 +71,7 @@ uint8_t* array2;
 /********************************************************************
 Vulnerable victim function.
 ********************************************************************/
-uint8_t temp = 0; /* Used so compiler won’t optimize out victim_function() */
+volatile uint8_t temp = 0; // So compiler won’t optimize out victim_function
 
 void victim_function(size_t x) {
   if (x < array1_size) {
@@ -77,27 +83,39 @@ void victim_function(size_t x) {
 /********************************************************************
 Helper/Initialization functions.
 ********************************************************************/
-//template <typename T>
-//void print_va(T const* t) {
-//  printf("secret (%d bytes) at VA: 0x%lX\n", sizeof(t), (size_t)t);
-//}
+void update_secret(std::string& s) {
+  char* cstring_copy = const_cast<char*>(s.c_str());
 
-void update_secret(const std::string& s) {
-  if (s.size() < sizeof(secret)) {
-    // Update static-global secret:
-    std::memcpy(secret, s.c_str(), sizeof(secret));
-    printf("secret (%ld bytes) at VA: 0x%lX\n", sizeof(secret), (size_t)secret);
-
-    int64_t malicious_x = (int64_t)(secret - (char *)array1);
-    std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
-  }
-
-  // Update heap' secret:
-  secret_heap = std::move(s); // move constructs, so only exists in one place in heap.
-  printf("secret_heap (%ld bytes) at VA: 0x%lX\n", s.size(), (size_t)secret_heap.c_str());
-
-  int64_t malicious_x = (int64_t)(secret_heap.c_str() - (char *)array1);
+  // Update stack's secret:
+  memcpy(secret_stack, cstring_copy, s.size());
+  printf("secret_stack (%ld bytes) at VA: 0x%lX\n",
+         std::min(s.size(),MAX_BUF_LENGTH) , (size_t)secret_stack);
+  int64_t malicious_x = (int64_t)(secret_stack - (char *)array1);
   std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
+
+  // Update global's secret:
+  memcpy(secret_global, cstring_copy, s.size());
+  printf("secret_global (%ld bytes) at VA: 0x%lX\n",
+         std::min(s.size(),MAX_BUF_LENGTH), (size_t)secret_global);
+  malicious_x = (int64_t)(secret_global - (char *)array1);
+  std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
+
+  // Update heap's secret:
+  for (auto& c : secret_heap) {
+    c = 0;  // erase old secret_heap if it exists...
+  }
+  secret_heap = std::vector<char>(s.size());
+  memcpy(secret_heap.data(), cstring_copy, secret_heap.size());
+  printf("secret_heap (%ld bytes) at VA: 0x%lX\n",
+         secret_heap.size(), (size_t)secret_heap.data());
+  malicious_x = (int64_t)(secret_heap.data() - (char *)array1);
+  std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
+
+  // Erase strings used for initialization:
+  for (size_t i = 0; i < s.size(); i++) {
+    s[i] = 0;
+    cstring_copy[i] = 0;
+  }
 }
 
 
@@ -159,8 +177,9 @@ void print_config() {
   std::cout << std::endl;
 
   /* Print information about vulnerable items */
+  std::cout << "sizeof(size_t): " << sizeof(size_t) << " bytes." << std::endl;
   printf("array1 (%ld bytes) at VA: 0x%lX\n", sizeof(array1), (size_t)array1);
-  printf("array2 (%ld bytes) at VA: 0x%lX\n", sizeof(array2), (size_t)array2);
+  printf("array2 (%ld bytes) at VA: 0x%lX\n", sizeof(region::array2), (size_t)array2);
 }
 
 
@@ -204,7 +223,7 @@ inline void flush_condition() {
 
 
 inline bool touch_secret(size_t i = 0) {
-  return (secret[i] == secret_heap[i]);
+  return (secret_global[i] == secret_heap[i] == secret_stack[i]);
 }
 
 
@@ -248,6 +267,7 @@ void recv_worker(uint16_t port = 7777) {
       msg& m = reinterpret_cast<msg&>(buf);
       auto x = m.x;
 
+//#define DEBUG
 #ifdef DEBUG
       std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
       std::cout << "x=" << x << std::endl;
@@ -281,8 +301,8 @@ Main.
 */
 int main(int argc, const char *argv[]) {
   // Initialization:
-  print_config();
   init_pages();   // Setup shared memory for array2 (side-channel)
+  print_config();
 
   /* Parse the listen port from the first command line argument.
      (OPTIONAL) */
@@ -293,7 +313,6 @@ int main(int argc, const char *argv[]) {
       std::cerr << "Overriding command line argument for port." << std::endl;
       port = 7777;
     }
-//    sscanf(argv[1], "%d", &cache_hit_threshold);
   }
 
   // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
@@ -312,13 +331,15 @@ int main(int argc, const char *argv[]) {
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // Loop forever, allowing user to enter new secrets:
+  char secet_local[MAX_BUF_LENGTH];
+  secret_stack = secet_local;  // set global pointer
   for (;;) {
     std::string buf;
     std::cout << "Please enter secret string:" << std::endl;
     std::getline(std::cin, buf);
 
     if (buf.length() > 0) {
-      update_secret(buf.c_str()); // buf now empty..
+      update_secret(buf);
     }
   }
 
