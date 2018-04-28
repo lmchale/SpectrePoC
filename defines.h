@@ -20,7 +20,7 @@
 
 #pragma pack(push, 1)
 struct msg {
-  size_t x;
+  uint64_t x;
 };
 #pragma pack(pop)
 

