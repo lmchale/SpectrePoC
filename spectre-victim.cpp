@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <numeric>
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -190,14 +191,16 @@ void print_config() {
 void parse_args(int argc, char* const argv[]) {
   constexpr auto DEFAULT = "These are not the droids you are looking for...";
   std::string init_secret(DEFAULT);
+  std::string test_secret(256, char(0));
+  std::iota(test_secret.begin(), test_secret.end(), 0);
 
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "hp:s:")) > 0) {
+  while ( (c = getopt(argc, argv, "hp:s:t")) > 0) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
-          << "[-p udp_port]"
+          << "[-p udp_port] [-t]"
           << std::endl;
       exit(EXIT_SUCCESS);
       break;
@@ -206,6 +209,9 @@ void parse_args(int argc, char* const argv[]) {
       break;
     case 's': // Initialize secret on startup
       init_secret = std::string(optarg);
+      break;
+    case 't': // Test secret to cover all 256 byte values
+      init_secret = test_secret;
       break;
     case '?':
       std::cerr << "Unknown argument: " << opterr << std::endl;
