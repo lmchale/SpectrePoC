@@ -78,6 +78,7 @@ std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
 
 /* Other global (optional) parameters */
 uint16_t udp_port = 7777;
+string ipv4_addr("127.0.0.1");
 
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
@@ -424,12 +425,13 @@ void parse_args(int argc, char* const argv[]) {
 
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "ht:a:s:l:o:c:p:")) > 0) {
+  while ( (c = getopt(argc, argv, "ht:a:s:l:o:c:p:i:")) > 0) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
           << " {(-o target_x_offset) | (-t target_va]) (-a array1_va)}" \
-             " (-l target_bytes) [-c cache_hit_threshold] [-p udp_port]"
+             " (-l target_bytes) [-c cache_hit_threshold]"\
+             " [-i ipv4_address] [-p udp_port]"
           << std::endl;
       exit(EXIT_SUCCESS);
       break;
@@ -453,8 +455,11 @@ void parse_args(int argc, char* const argv[]) {
     case 'c': // Cache hit threshold (size_t)
       cache_hit_threshold = atoll(optarg);
       break;
-    case 'p': // Bind to another UDP port (uint16_t)
+    case 'p': // Send to another UDP port (uint16_t)
       udp_port = atol(optarg);
+      break;
+    case 'i': // Send to another IPv4 address (string)
+      ipv4_addr = optarg;
       break;
     case '?':
       std::cerr << "Unknown argument: " << opterr << std::endl;
@@ -503,7 +508,7 @@ void send_worker(uint16_t port) {
   // Socket initialization:
   uint8_t buf[2048];
   SocketUDP s;
-  assert(s.setRemote("127.0.0.1", port) == 0);
+  assert(s.setRemote(ipv4_addr, port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
 
   constexpr size_t MIN_MEASUREMENTS = 64;
@@ -683,13 +688,13 @@ int main(int argc, char* const argv[]) {
   }
   std::cout << "Reading " << target_len << " bytes."<< std::endl;
 
-  // What is this doing?
+
+  // TODO: What is this doing?
   #ifdef NOCLFLUSH
   for (int i = 0; i < sizeof(cache_flush_array); i++) {
     cache_flush_array[i] = 1;
   }
   #endif
-
 
 
   // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
