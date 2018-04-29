@@ -18,9 +18,18 @@
 #include <cstring>
 
 
+enum Request {
+  FN_HELPER = 1,
+  FN_HELPER_SIMPLE = 2,
+  FN_TOUCH_SECRET = 3,
+  FN_EVICT_CONDITION = 4
+};
+
+
 #pragma pack(push, 1)
 struct msg {
   uint64_t x;
+  Request fn;
 };
 #pragma pack(pop)
 

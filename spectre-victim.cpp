@@ -39,9 +39,12 @@
 #include "defines.h"
 
 /********************************************************************
-Victim constants.
+Victim globals.
 ********************************************************************/
 //constexpr size_t MAX_LEN = 256 * 512;
+
+/* Other global (optional) parameters */
+uint16_t udp_port = 7777;
 
 
 /********************************************************************
@@ -129,7 +132,7 @@ void init_pages() {
   int sm_handle = shm_open(SM_HANDLENAME, O_CREAT|O_TRUNC|O_RDWR, S_IRUSR|S_IWUSR);
   if (sm_handle < 0) {
     std::cerr << "Error opening shared memory with handle name: "
-              << SM_HANDLENAME << std::endl;
+              << SM_HANDLENAME << " with error " << errno << std::endl;
     exit(EXIT_FAILURE);
   }
   if (ftruncate(sm_handle, SM_SIZE) < 0) {
@@ -184,6 +187,40 @@ void print_config() {
 }
 
 
+void parse_args(int argc, char* const argv[]) {
+  constexpr auto DEFAULT = "These are not the droids you are looking for...";
+  std::string init_secret(DEFAULT);
+
+  int c;
+  opterr = 0;
+  while ( (c = getopt(argc, argv, "hp:s:")) > 0) {
+    switch (c) {
+    case 'h':
+      std::cout << argv[0]
+          << "[-p udp_port]"
+          << std::endl;
+      exit(EXIT_SUCCESS);
+      break;
+    case 'p': // Bind to another UDP port (uint16_t)
+      udp_port = atol(optarg);
+      break;
+    case 's': // Initialize secret on startup
+      init_secret = std::string(optarg);
+      break;
+    case '?':
+      std::cerr << "Unknown argument: " << opterr << std::endl;
+      exit(EXIT_FAILURE);
+    default:
+      std::cerr << "Unexpected argument string: " << optarg << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // Update initialization secret with default or custom parameter:
+  update_secret(init_secret);
+}
+
+
 
 /********************************************************************
 UDP socket functions.
@@ -225,7 +262,8 @@ inline void flush_condition() {
 
 
 inline bool touch_secret(size_t i = 0) {
-  return (secret_global[i] == secret_heap[i] == secret_stack[i]);
+  return (secret_global[i] == secret_heap[i] &&
+          secret_global[i] == secret_stack[i]);
 }
 
 
@@ -251,7 +289,17 @@ void helper(size_t malicious_x, size_t training_x = 0) {
 }
 
 
-void recv_worker(uint16_t port = 7777) {
+void helper_simple(size_t x) {
+  volatile bool equal = touch_secret(); // ensures secret is cached (optional?)
+  flush_condition();  // ensures speculation occurs (optional?)
+
+  /* Call the victim function! */
+  victim_function(x);
+}
+
+
+
+void recv_worker(uint16_t port) {
   constexpr size_t ARRAY1_LEN = 16;
   uint8_t pkt_buf[2048];
 
@@ -266,6 +314,7 @@ void recv_worker(uint16_t port = 7777) {
     if (bytes == sizeof(msg)) {
       msg& m = reinterpret_cast<msg&>(pkt_buf);
       auto x = m.x;
+      Request fn = m.fn;
 
 //#define DEBUG
 #ifdef DEBUG
@@ -300,21 +349,15 @@ Main.
 *  Command line arguments:
 *  1: UDP Port (int)
 */
-int main(int argc, const char *argv[]) {
+int main(int argc, char* const argv[]) {
+  // Allocate space on stack for stack's secret:
+  char secet_local[MAX_BUF_LENGTH];
+  secret_stack = secet_local;  // set global pointer for helper functions
+
   // Initialization:
   init_pages();   // Setup shared memory for array2 (side-channel)
   print_config();
-
-  /* Parse the listen port from the first command line argument.
-     (OPTIONAL) */
-  int port = 7777;
-  if (argc >= 2) {
-    port = atoi(argv[1]);
-    if ( !(port > 0 && port < (1<<16)-1) ) {
-      std::cerr << "Overriding command line argument for port." << std::endl;
-      port = 7777;
-    }
-  }
+  parse_args(argc, argv);
 
   // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
   // only CPU i as set.
@@ -323,7 +366,7 @@ int main(int argc, const char *argv[]) {
   CPU_SET(1, &cpuset);
 
   // Setup receive thread to imitate server:
-  std::thread t(recv_worker, port);
+  std::thread t(recv_worker, udp_port);
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
@@ -332,8 +375,6 @@ int main(int argc, const char *argv[]) {
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // Loop forever, allowing user to enter new secrets:
-  char secet_local[MAX_BUF_LENGTH];
-  secret_stack = secet_local;  // set global pointer
   for (;;) {
     std::string buf;
     std::cout << "Please enter secret string:" << std::endl;

