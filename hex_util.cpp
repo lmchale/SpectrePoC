@@ -62,12 +62,16 @@ string make_printable(const string& s) {
 }
 
 
-string hexin(const string& s) {
-  string buf(s.size()/2, 0);
+string hexin(string s) {
+  // Remove leading 0x, if present
+  if (s.substr(0,2) == "0x") {
+    s.erase(0,2);
+  }
 
+  string buf(s.size()/2, 0);
   for (size_t i = 0; i < buf.size(); i++) {
     stringstream ss;
-    ss << s[i*2] << s[i*2 + 1];
+    ss << s.at(i*2) << s.at(i*2 + 1);
     uint16_t byte;
     ss >> hex >> byte;
     buf[i] = byte;

@@ -79,4 +79,24 @@ auto ascii = [](std::string &s, auto n) {
 };
 
 
+template <typename T>
+T convert_to_int(std::string s) {
+  std::stringstream ss;
+
+  // If 0x, remove and treat as hex:
+  if (s.substr(0,2) == "0x") {
+    s.erase(0,2);
+    ss << std::hex << s;
+  }
+  else {
+    ss << s;
+  }
+
+  assert(s.size() <= 2*sizeof(T));
+  T val;
+  ss >> std::hex >> val;
+  return val;
+}
+
+
 #endif // HEX_UTIL_H

