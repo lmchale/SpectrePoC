@@ -467,10 +467,10 @@ int main(int argc, char* const argv[]) {
 
   // Setup receive thread to imitate server:
   std::thread t(recv_worker_v2, udp_port);
-//  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
-//  if (rc != 0) {
-//    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
-//  }
+  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+  if (rc != 0) {
+    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+  }
 
   // Simply sufficient time for threads to start before prompting user:
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
