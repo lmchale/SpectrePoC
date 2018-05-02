@@ -92,15 +92,15 @@ void update_secret(std::string& s) {
 
   // Update stack's secret:
   memcpy(secret_stack, cstring_copy, s.size());
-  printf("secret_stack (%ld bytes) at VA: 0x%lX\n",
-         std::min(s.size(),MAX_BUF_LENGTH) , (size_t)secret_stack);
+  printf("secret_stack (%ld bytes) at VA: %p\n",
+         std::min(s.size(),MAX_BUF_LENGTH) , secret_stack);
   int64_t malicious_x = (int64_t)(secret_stack - (char *)array1);
   std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
 
   // Update global's secret:
   memcpy(secret_global, cstring_copy, s.size());
-  printf("secret_global (%ld bytes) at VA: 0x%lX\n",
-         std::min(s.size(),MAX_BUF_LENGTH), (size_t)secret_global);
+  printf("secret_global (%ld bytes) at VA: %p\n",
+         std::min(s.size(),MAX_BUF_LENGTH), secret_global);
   malicious_x = (int64_t)(secret_global - (char *)array1);
   std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
 
@@ -110,8 +110,8 @@ void update_secret(std::string& s) {
   }
   secret_heap = std::vector<char>(s.size());
   memcpy(secret_heap.data(), cstring_copy, secret_heap.size());
-  printf("secret_heap (%ld bytes) at VA: 0x%lX\n",
-         secret_heap.size(), (size_t)secret_heap.data());
+  printf("secret_heap (%ld bytes) at VA: %p\n",
+         secret_heap.size(), secret_heap.data());
   malicious_x = (int64_t)(secret_heap.data() - (char *)array1);
   std::cout << "- byte offset relative to array1: " << malicious_x << '\n';
 
@@ -182,11 +182,9 @@ void print_config() {
 
   /* Print information about vulnerable items */
   std::cout << "sizeof(size_t): " << sizeof(size_t) << " bytes." << std::endl;
-  printf("array1 (%ld bytes) at VA: 0x%lX\n", sizeof(array1), (size_t)array1);
-  printf("array1_size (%ld bytes) at VA: 0x%lX\n",
-         sizeof(array1_size), (size_t)(&array1_size));
-  printf("array2 (%ld bytes) at VA: 0x%lX\n",
-         sizeof(region::array2), (size_t)array2);
+  printf("array1 (%ld bytes) at VA: %p\n", sizeof(array1), array1);
+  printf("array1_size (%ld bytes) at VA: %p\n", sizeof(array1_size), &array1_size);
+  printf("array2 (%ld bytes) at VA: %p\n", sizeof(region::array2), array2);
 }
 
 
