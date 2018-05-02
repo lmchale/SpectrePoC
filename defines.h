@@ -27,7 +27,7 @@ enum Request {
   // Emulates a gadget which safely causes secret's page to load into TLB:
   FN_TOUCH_SECRET = 3,
   // Emulates a gadget which safely causes VA's page to load into TLB:
-  FN_TOUCH_VA = 4
+  FN_TOUCH_PAGE = 4
 };
 
 

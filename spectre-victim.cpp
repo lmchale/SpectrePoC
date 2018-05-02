@@ -276,23 +276,40 @@ inline bool touch_secret(size_t i = 0) {
   // Fill TLB with entry correspoding to each secret:
   // -- side effect: pulls first cache line of each page into cache.
   const uint8_t* page1 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_heap[i]) ) & (1-PAGE_SIZE) );
+        ( (size_t)(&secret_heap[i]) ) & ~(PAGE_SIZE-1) );
   const uint8_t* page2 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_global[i]) ) & (1-PAGE_SIZE) );
+        ( (size_t)(&secret_global[i]) ) & ~(PAGE_SIZE-1) );
   const uint8_t* page3 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_stack[i]) ) & (1-PAGE_SIZE) );
+        ( (size_t)(&secret_stack[i]) ) & ~(PAGE_SIZE-1) );
   tmp ^= *page1 ^ *page2 ^ *page3;
   return tmp == 0;  // unsued return
 }
 
 
-inline bool touch_page(size_t va) {
+inline bool touch_va(size_t va) {
   constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
   volatile static uint8_t tmp;
 
   // Fill TLB with entry correspoding to va:
   // -- side effect: pulls first cache line of page into cache.
-  const uint8_t* page = reinterpret_cast<uint8_t*>(va & (1-PAGE_SIZE));
+  const uint8_t* page = reinterpret_cast<uint8_t*>(va & ~(PAGE_SIZE-1));
+  tmp ^= *page;
+  return tmp == 0;  // unsued return
+}
+
+
+inline bool touch_page(size_t x) {
+  constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
+  volatile static uint8_t tmp;
+
+  // Calculate pointer to first byte in page:
+  // - mimics array1-relative addressing for simplicity...
+  const uint8_t* page = reinterpret_cast<uint8_t*>(
+        reinterpret_cast<size_t>(&array1[x]) & ~(PAGE_SIZE-1));
+  printf("Touching TLB page with 1 byte load at VA: %p\n", page);
+
+  // Fill TLB with entry correspoding to x:
+  // - side effect: pulls first cache line of page into cache
   tmp ^= *page;
   return tmp == 0;  // unsued return
 }
@@ -406,7 +423,7 @@ void recv_worker_v2(uint16_t port) {
         std::cout << "Emulating gadget: touch_secret("<<x<<")" << std::endl;
         touch_secret(x);
         break;
-      case FN_TOUCH_VA:
+      case FN_TOUCH_PAGE:
         std::cout << "Emulating gadget: touch_page("<<x<<")" << std::endl;
         touch_page(x);
         break;
