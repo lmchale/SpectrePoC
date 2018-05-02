@@ -1,3 +1,11 @@
+/*********************************************************************
+*
+* Multi-process Spectre PoC
+*
+* Significant modifications have been made by Luke McHale to demonstrate
+*  Spectre across seperate victim and attacker processes.
+*
+**********************************************************************/
 
 // C++ Includes:
 #include <vector>

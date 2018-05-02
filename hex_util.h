@@ -1,6 +1,15 @@
 #ifndef HEX_UTIL_H
 #define HEX_UTIL_H
 
+/*********************************************************************
+*
+* Multi-process Spectre PoC
+*
+* Significant modifications have been made by Luke McHale to demonstrate
+*  Spectre across seperate victim and attacker processes.
+*
+**********************************************************************/
+
 // C++ Includes:
 #include <string>
 
@@ -15,21 +24,19 @@
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
 
-using namespace std;
-
 // Forward Delcares:
-string hexdump(const string& s);
-string hexdump(const void* msg, size_t bytes);
-bool printable(const string &s);
-string make_printable(const string& s);
-string make_printable(const void* msg, size_t bytes);
-string hexin(const string& s);
-size_t hamming(const string& lhs, const string& rhs);
+std::string hexdump(const std::string& s);
+std::string hexdump(const void* msg, size_t bytes);
+bool printable(const std::string &s);
+std::string make_printable(const std::string& s);
+std::string make_printable(const void* msg, size_t bytes);
+std::string hexin(const std::string& s);
+size_t hamming(const std::string& lhs, const std::string& rhs);
 
 
 ///////////////////////////////////////////////////////////////////////////////
 // Permutation lambda:
-auto permute = [](string &s, auto n) {
+auto permute = [](std::string &s, auto n) {
   using byte = uint8_t;
 
   // Select new random byte to replace:
@@ -45,7 +52,7 @@ auto permute = [](string &s, auto n) {
 
 
 // ASCII selection lambda:
-auto ascii = [](string &s, auto n) {
+auto ascii = [](std::string &s, auto n) {
   using byte = uint8_t;
 
   // Select new random byte to replace:
