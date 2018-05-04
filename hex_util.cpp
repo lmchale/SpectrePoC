@@ -46,7 +46,9 @@ string hexdump(const void* msg, size_t bytes) {
 
 bool printable(const string &s) {
   for (uint8_t c : s) {
-    if (c < 32 || c > 126) { return false; }
+    if (!(c >= 32 && c <= 126) && !(c >= 9 && c <= 12)) {
+      return false;
+    }
   }
   return true;
 }

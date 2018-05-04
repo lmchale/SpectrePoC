@@ -754,7 +754,7 @@ void send_worker_v2(uint16_t port) {
     bool significant = best >= (second/2) && sum >= 64;
     // Are we suspicious of Intel's Zero-value predicition on minor page fault?
     bool zero_value_prediciton = (counts_idx[0] == 0) &&
-                                 (sum < 2*MIN_MEASUREMENTS);
+                                 (sum <= 4*MIN_MEASUREMENTS);
 
     // Dynamic confidence adjustment:
     bool confident = single_contender || significant;
@@ -781,7 +781,7 @@ void send_worker_v2(uint16_t port) {
       }
 
       // Retry, quadruple the number of measurments:
-      measurements *= 4;
+      measurements *= 8;
     }
     else if (!confident) {
       // Retry, doubling the number of measurments:

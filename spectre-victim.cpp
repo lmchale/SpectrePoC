@@ -12,6 +12,7 @@
 **********************************************************************/
 
 // C++ Includes:
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -195,13 +196,18 @@ void parse_args(int argc, char* const argv[]) {
   std::string test_secret(256, char(0));
   std::iota(test_secret.begin(), test_secret.end(), 0);
 
+  // Used if secret loaded from file:
+  std::ifstream file;
+  std::streamsize fileLength;
+  std::vector<char> buffer;
+
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "hp:s:t")) > 0) {
+  while ( (c = getopt(argc, argv, "hp:s:tf:")) > 0) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
-          << " [-p udp_port] [-t]"
+          << " [-p udp_port] [-f filename] [-t]"
           << std::endl;
       exit(EXIT_SUCCESS);
       break;
@@ -213,6 +219,18 @@ void parse_args(int argc, char* const argv[]) {
       break;
     case 't': // Test secret to cover all 256 byte values
       init_secret = test_secret;
+      break;
+    case 'f': // File to load into secret at runtime
+      file = std::ifstream(optarg, std::ios::binary|std::ios::ate);
+      fileLength = file.tellg();
+      file.seekg(0, std::ios::beg);
+      buffer = std::vector<char>(fileLength);
+      if ( file.read(buffer.data(), fileLength) ) {
+        init_secret = std::string(buffer.begin(), buffer.end());
+      }
+      else {
+        std::cerr << "Failed to open file: " << optarg << std::endl;
+      }
       break;
     case '?':
       std::cerr << "Unknown argument: " << opterr << std::endl;
