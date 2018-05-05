@@ -36,24 +36,7 @@ struct msg {
 
 
 #pragma pack(push, 1)
-struct addressing {
-  // Location of vulnerable array:
-  size_t array1;
-  size_t array1_len;
-  // Location of side-channel array:
-  size_t array2;
-  size_t array2_len;
-  // Location of secret:
-  size_t secret;
-  size_t secret_heap;
-  size_t secret_len;
-};
-#pragma pack(pop)
-
-
-#pragma pack(push, 1)
 struct region { /* Defines 'structure' of shared memory' */
-//  size_t len;
   uint8_t array2[256 * 512];
 };
 #pragma pack(pop)

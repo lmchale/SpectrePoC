@@ -12,6 +12,7 @@
 
 // C++ Includes:
 #include <string>
+#include <algorithm>
 
 // C Includes:
 #include <cstdlib>
@@ -27,6 +28,7 @@
 // Forward Delcares:
 std::string hexdump(const std::string& s);
 std::string hexdump(const void* msg, size_t bytes);
+inline bool printable(const char c);
 bool printable(const std::string &s);
 std::string make_printable(const std::string& s);
 std::string make_printable(const void* msg, size_t bytes);
@@ -51,8 +53,8 @@ auto permute = [](std::string &s, auto n) {
 };
 
 
-// ASCII selection lambda:
-auto ascii = [](std::string &s, auto n) {
+// ASCII permutation-selection lambda:
+auto permute_ascii = [](std::string &s, auto n) {
   using byte = uint8_t;
 
   // Select new random byte to replace:
@@ -64,17 +66,17 @@ auto ascii = [](std::string &s, auto n) {
 
   // Fairly pick next ASCII char:
   byte x = b & 0x7F;  // range of 0-127 (attempt 1)
-  if ( unlikely(x < 32 || x > 126) ) {
+  if ( unlikely(!printable(x)) ) {
     // outside of common ASCII letters and symbols; retry with inversion:
     bool fold = (b & 0x80) == 0x80;   // true if ms-bit is set
     x = fold ? ~b : b;  // range of 0-127 (attempt 2)
   }
-  if ( unlikely(x < 32 || x > 126) ) {
+  if ( unlikely(!printable(x)) ) {
     // still outside of common ASCII letters and symbols; ensure with offset:
     byte shift = x + 32;
     x = (shift & 0x7F) + (shift >> 7);  // range of 0-127 (attempt 3)
   }
-  assert(x >= 32 && x <= 126);
+  assert(printable(x));
   *ptr = x;
 };
 
@@ -96,6 +98,20 @@ T convert_to_int(std::string s) {
   T val;
   ss >> std::hex >> val;
   return val;
+}
+
+
+template <typename T>
+std::vector<size_t> sort_indexes(const T& v) {
+  // Create index vector of identical size to vector v:
+  std::vector<size_t> idx(v.size());
+  std::iota(idx.begin(), idx.end(), 0);
+
+  // Sort index vector based on values in v:
+  std::sort(idx.begin(), idx.end(),
+            [&v](size_t i1, size_t i2) {return v[i1] > v[i2];});
+
+  return idx;
 }
 
 
