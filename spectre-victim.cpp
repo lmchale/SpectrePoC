@@ -332,22 +332,22 @@ void victim_worker(uint16_t port) {
       case FN_NULL:
       case FN_PROCESS:
 #ifdef DEBUG
-        std::cout << "Calling helper_simple("<<x<<")" << std::endl;
+        std::cout << "Calling victim_function("<<x<<")" << std::endl;
 #endif
         victim_function(x);
         break;
       case FN_EVICT_CONDITION:
 #ifdef DEBUG
-        std::cout << "Emulating gadget: flush_condition()" << std::endl;
+        std::cout << "Emulating gadget: gadget_flush_condition()" << std::endl;
 #endif
         gadget_flush_condition();
         break;
       case FN_TOUCH_SECRET:
-        std::cout << "Emulating gadget: touch_secret("<<x<<")" << std::endl;
+        std::cout << "Emulating gadget: gadget_touch_secrets("<<x<<")" << std::endl;
         gadget_touch_secrets(x);
         break;
       case FN_TOUCH_PAGE:
-        std::cout << "Emulating gadget: touch_page("<<x<<")" << std::endl;
+        std::cout << "Emulating gadget: gadget_touch_page("<<x<<")" << std::endl;
         gadget_touch_page(x);
         break;
       default:
