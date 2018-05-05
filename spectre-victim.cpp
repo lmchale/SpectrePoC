@@ -88,6 +88,8 @@ void victim_function(size_t x) {
 /********************************************************************
 Victim gadgets potentially leveraged by attacker.
 ********************************************************************/
+// TODO: Kicking array1_size out of cache is currently done by the victim.
+// -  Need to rework...  Last real crutch in shared-memory PoC.
 inline void gadget_flush_condition() {
   _mm_clflush( &array1_size );
 
@@ -100,10 +102,12 @@ inline void gadget_flush_condition() {
 }
 
 
+// Ensures TLB contains an entry for Virtual Address (va):
+// - Assumes caller knows the va is indeed mapped (else segfault will occur).
 inline bool gadget_touch_va(const size_t va) {
   volatile static uint8_t tmp;
 
-  // Fill TLB with entry correspoding to va:
+  // Fill TLB with entry corresponding to va:
   // -- side effect: pulls first cache line of page into cache.
   const uint8_t* page = reinterpret_cast<const uint8_t*>(va & ~(PAGE_SIZE-1));
   printf(" -touching page for TLB with 1 byte load at VA: %p\n", page);
@@ -122,13 +126,15 @@ inline bool gadget_touch_page(const size_t x) {
         reinterpret_cast<size_t>(&array1[x]) & ~(PAGE_SIZE-1));
   printf("- touching page for TLB with 1 byte load at VA: %p\n", page);
 
-  // Fill TLB with entry correspoding to x:
+  // Fill TLB with entry corresponding to x:
   // - side effect: pulls first cache line of page into cache
   tmp ^= *page;
   return tmp == 0;  // unsued return
 }
 
 
+// Emulates a call to a function which uses the secret, but does not expose it:
+// - Guaranteed to be safe since Secrets are initialized to something in this PoC.
 inline bool gadget_touch_secrets(size_t i = 0) {
   volatile uint8_t tmp;
 
@@ -307,16 +313,16 @@ void parse_args(int argc, char* const argv[]) {
 
 
 /********************************************************************
-UDP socket functions.
+UDP socket worker thread.
 ********************************************************************/
 void victim_worker(uint16_t port) {
+  // Initialize and open socket:
   uint8_t pkt_buf[2048];
-
   SocketUDP s;
   s.open(port);
-
   std::cout << "["<<port<<"] - Receive worker thread listening." << std::endl;
 
+  // Wait forever for new messages:
   for (;;) {
     auto bytes = s.recv(pkt_buf, sizeof(pkt_buf));
     if (bytes == sizeof(msg)) {
@@ -331,22 +337,30 @@ void victim_worker(uint16_t port) {
       switch (fn) {
       case FN_NULL:
       case FN_PROCESS:
+        // Primary exposed function as intended in victim.
 #ifdef DEBUG
         std::cout << "Calling victim_function("<<x<<")" << std::endl;
 #endif
         victim_function(x);
         break;
       case FN_EVICT_CONDITION:
+        // Gadget, secondary functionality which is unintended.
+        // - Required for processor speculation for Spectre.
+        // - TODO: Should be reworked to be performed in the Attacker's process.
 #ifdef DEBUG
         std::cout << "Emulating gadget: gadget_flush_condition()" << std::endl;
 #endif
         gadget_flush_condition();
         break;
       case FN_TOUCH_SECRET:
+        // Gadget, secondary functionality which impacts processor's TLB.
         std::cout << "Emulating gadget: gadget_touch_secrets("<<x<<")" << std::endl;
         gadget_touch_secrets(x);
         break;
       case FN_TOUCH_PAGE:
+        // Gadget, secondary functionality which impacts processor's TLB.
+        // - Note: allows pulling any (mapped) page into TLB, assists attacker
+        //   only when reading arbitrary virtual addresses.
         std::cout << "Emulating gadget: gadget_touch_page("<<x<<")" << std::endl;
         gadget_touch_page(x);
         break;
@@ -359,7 +373,8 @@ void victim_worker(uint16_t port) {
       s.send(&m, sizeof(m));
     }
     else {
-      std::cerr << "["<<port<<"]- Received an unexpected" << bytes << "...\n";
+      std::cerr << "["<<port<<"]- Received an unexpected packet with "
+                << bytes << " bytes." << std::endl;
       return;
     }
   }
